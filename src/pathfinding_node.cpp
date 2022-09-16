@@ -40,18 +40,8 @@
 #include <std_msgs/Int16.h>
 
 #include <mutex>
-#include <opencv2/core.hpp>
-#include <opencv2/core/base.hpp>
-#include <opencv2/core/eigen.hpp>
-#include <opencv2/dnn.hpp>
-#include <opencv2/dnn/all_layers.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/highgui/highgui.hpp>
-#include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
-#include <opencv2/ximgproc.hpp>
 
-#include "opencv2/features2d.hpp"
 #include "ros/duration.h"
 #include "ros/node_handle.h"
 #include "std_msgs/String.h"
@@ -98,6 +88,7 @@ int colNum[] = {0, -1, 1, 0, 1, -1, -1, 1};
 
 int foundPathCount = 0;
 std::vector<std::vector<cv::Point>> savedPaths;
+
 int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
                 cv::Mat plotBorder, int divider) {
   // check source and destination cell of the matrix have value 1
