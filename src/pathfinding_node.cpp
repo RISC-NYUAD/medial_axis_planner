@@ -35,7 +35,6 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <bits/stdc++.h>
 #include <octomap_server/OctomapServer.h>
 #include <ros/ros.h>
 #include <std_msgs/Int16.h>
@@ -57,8 +56,6 @@
 #include "ros/node_handle.h"
 #include "std_msgs/String.h"
 #include "visualization_msgs/MarkerArray.h"
-using namespace std;
-using namespace cv;
 
 int boundBoxMinX = 100000;
 int boundBoxMinY = 100000;
@@ -68,9 +65,9 @@ int boundBoxMaxY = -100000;
 ////////////////// SEARCH PATH
 // C++ program to find the shortest path between
 // a given source cell to a destination cell.
-// using namespace std;
-#define ROW 60   // 45 with 16, 60 with 12
-#define COL 106  // 80 with 16, 106 with 12
+
+#define ROW 60  // 45 with 16, 60 with 12
+#define COL 106 // 80 with 16, 106 with 12
 
 // To store matrix cell coordinates
 struct SPoint {
@@ -80,10 +77,10 @@ struct SPoint {
 
 // A Data Structure for queue used in BFS
 struct queueNode {
-  SPoint pt;  // The coordinates of a cell
-  int dist;   // cell's distance of from the source
+  SPoint pt; // The coordinates of a cell
+  int dist;  // cell's distance of from the source
   SPoint parentCoords;
-  vector<Point> pathPoints;
+  std::vector<cv::Point> pathPoints;
 };
 
 // check whether given cell (row, col) is a valid
@@ -100,13 +97,14 @@ int rowNum[] = {-1, 0, 0, 1, 1, -1, 1, -1};
 int colNum[] = {0, -1, 1, 0, 1, -1, -1, 1};
 
 int foundPathCount = 0;
-vector<vector<Point>> savedPaths;
-int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
-                int divider) {
+std::vector<std::vector<cv::Point>> savedPaths;
+int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
+                cv::Mat plotBorder, int divider) {
   // check source and destination cell of the matrix have value 1
   int testerA = mat.at<uchar>(src.x, src.y);
   int testerB = mat.at<uchar>(dest[0].x, dest[0].y);
-  if (!testerA > 0 || !testerB > 0) return -2;
+  if (!(testerA > 0) || !(testerB > 0))
+    return -2;
 
   bool visited[ROW][COL];
   memset(visited, false, sizeof visited);
@@ -115,25 +113,25 @@ int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
   visited[src.x][src.y] = true;
 
   // Create a queue for BFS
-  queue<queueNode> q;
-  queue<queueNode> qA;
+  std::queue<queueNode> q;
+  std::queue<queueNode> qA;
 
   // Distance of source cell is 0
   queueNode s = {src, 0};
-  q.push(s);  // Enqueue source cell
+  q.push(s); // Enqueue source cell
 
   // Do a BFS starting from source cell
   int countSaved = 0;
   if (foundPathCount == dest.size() && foundPathCount > 0) {
   } else {
-    savedPaths.clear();  // clear saved if found new
+    savedPaths.clear(); // clear saved if found new
   }
   int toggle = 0;
   while (!q.empty()) {
     queueNode curr = q.front();
     SPoint pt = curr.pt;
 
-    Point last_Point = Point(curr.pt.x, curr.pt.y);
+    cv::Point last_Point = cv::Point(curr.pt.x, curr.pt.y);
     float lastParentDist = curr.dist;
 
     // If we have reached the destination cell, we are done
@@ -142,12 +140,12 @@ int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
       // foundPathCount = dest.size();
 
       // plot history
-      cout << "savedPaths.size() = "
-           << "SAME " << savedPaths.size() << endl;
+      std::cout << "savedPaths.size() = "
+                << "SAME " << savedPaths.size() << std::endl;
       for (int i = 0; i < savedPaths.size(); i++) {
-        vector<Point> currPREV = savedPaths[i];
-        cout << "currPREV.size() = "
-             << "SAME " << currPREV.size() << endl;
+        std::vector<cv::Point> currPREV = savedPaths[i];
+        std::cout << "currPREV.size() = "
+                  << "SAME " << currPREV.size() << std::endl;
         for (int j = 0; j < currPREV.size(); j++) {
           circle(plotBorder, currPREV[j] * divider, 3, CV_RGB(110, 15, 225),
                  -1);
@@ -159,13 +157,13 @@ int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
           }
           if (j > 0) {
             line(plotBorder, currPREV[j] * divider, currPREV[j - 1] * divider,
-                 Scalar(i / 1.5, 110, red), 2);
+                 cv::Scalar(i / 1.5, 110, red), 2);
           }
         }
       }
 
-      cout << "dest.size() = "
-           << "SAME " << dest.size() << endl;
+      std::cout << "dest.size() = "
+                << "SAME " << dest.size() << std::endl;
       return curr.dist;
     } else {
       // savedPaths.clear();//clear saved if found new
@@ -185,15 +183,17 @@ int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
           }
           if (j > 0) {
             line(plotBorder, curr.pathPoints[j] * divider,
-                 curr.pathPoints[j - 1] * divider, Scalar(i / 1.5, 110, red),
-                 2);
+                 curr.pathPoints[j - 1] * divider,
+                 cv::Scalar(i / 1.5, 110, red), 2);
           }
         }
         savedPaths.push_back(curr.pathPoints);
-        circle(plotBorder, Point(pt.y, pt.x) * divider, 9, CV_RGB(0, 255, 155),
-               -1);  // OPEN SPACE
-        circle(plotBorder, Point(pt.y, pt.x) * divider, 9, CV_RGB(11, 15, 155),
-               0.1);  // OPEN SPACE
+        circle(plotBorder, cv::Point(pt.y, pt.x) * divider, 9,
+               CV_RGB(0, 255, 155),
+               -1); // OPEN SPACE
+        circle(plotBorder, cv::Point(pt.y, pt.x) * divider, 9,
+               CV_RGB(11, 15, 155),
+               1); // OPEN SPACE
         // waitKey(10);
         // return curr.dist;
         foundPoints++;
@@ -202,18 +202,18 @@ int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
     // cout << "dest.size() = " << dest.size() << " foundPoints = " <<
     // foundPoints << " savedPaths size = " << savedPaths.size() << endl;
     if (dest.size() == savedPaths.size() &&
-        savedPaths.size() > 0) {  // dest.size()){
+        savedPaths.size() > 0) { // dest.size()){
       foundPathCount = dest.size();
       return curr.dist;
     }
     q.pop();
 
     int countrToggle = 8;
-    if (curr.dist % 2 != 0) {  // toggle == 0){
+    if (curr.dist % 2 != 0) { // toggle == 0){
       toggle = 1;
       countrToggle = 8;
-    } else {       // if(toggle == 1){
-      toggle = 0;  // 2;
+    } else {      // if(toggle == 1){
+      toggle = 0; // 2;
       countrToggle = 8;
     }
     // else{
@@ -232,7 +232,7 @@ int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
         isOne = true;
       }
       if (isValid(row, col) && tester && !visited[row][col]) {
-        curr.pathPoints.push_back(Point(curr.pt.y, curr.pt.x));
+        curr.pathPoints.push_back(cv::Point(curr.pt.y, curr.pt.x));
 
         // mark cell as visited and enqueue it
         visited[row][col] = true;
@@ -243,17 +243,17 @@ int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
 
         // TEXT
         cv::putText(
-            plotBorder,                                 // target image
-            to_string(curr.dist),                       // text
-            cv::Point(curr.pt.y, curr.pt.x) * divider,  // top-left position
-            cv::FONT_HERSHEY_DUPLEX, 0.23, CV_RGB(118, 185, 0),  // font color
+            plotBorder,                                // target image
+            std::to_string(curr.dist),                 // text
+            cv::Point(curr.pt.y, curr.pt.x) * divider, // top-left position
+            cv::FONT_HERSHEY_DUPLEX, 0.23, CV_RGB(118, 185, 0), // font color
             1);
       }
     }
   }
 
   // cv::imshow("Orig", plotBorder);
-  waitKey(10);
+  cv::waitKey(10);
 
   // Return -1 if destination cannot be reached
   return -1;
@@ -261,14 +261,14 @@ int BFSMULTIPLE(Mat mat, SPoint src, vector<SPoint> dest, Mat plotBorder,
 
 ////////////////// END SEARCH PATH
 
-Mat plotBorder;
+cv::Mat plotBorder;
 int xres = 1280;
 int yres = 720;
 float multiplier = 30;
 
 void chatterCallback(
-    const visualization_msgs::MarkerArray::ConstPtr&
-        msg)  // void chatterCallback(const std_msgs::String::ConstPtr& msg)
+    const visualization_msgs::MarkerArray::ConstPtr
+        &msg) // void chatterCallback(const std_msgs::String::ConstPtr& msg)
 {
   cv::namedWindow("Orig", cv::WINDOW_NORMAL);
 
@@ -287,7 +287,7 @@ void chatterCallback(
       XB = multiplier * XB;
       // std::cout << "Point: " << XA << "," << XB << std::endl;
       if (XC > 0.5 && XC < 0.9) {
-        circle(plotBorder, Point(XA, XB), 10, CV_RGB(142, 0, 0), -1);  // 11
+        circle(plotBorder, cv::Point(XA, XB), 10, CV_RGB(142, 0, 0), -1); // 11
 
         if (XA > boundBoxMaxX) {
           boundBoxMaxX = XA;
@@ -306,11 +306,11 @@ void chatterCallback(
   }
 }
 
-vector<Point> openSpaceSpots;
+std::vector<cv::Point> openSpaceSpots;
 
 void chatterCallbackA(
-    const visualization_msgs::MarkerArray::ConstPtr&
-        msg)  // void chatterCallback(const std_msgs::String::ConstPtr& msg)
+    const visualization_msgs::MarkerArray::ConstPtr
+        &msg) // void chatterCallback(const std_msgs::String::ConstPtr& msg)
 {
   for (int i = 0; i < msg->markers.size(); i++) {
     for (int j = 0; j < msg->markers[i].points.size(); j++) {
@@ -322,8 +322,8 @@ void chatterCallbackA(
       XB = XB + 10;
       XB = multiplier * XB;
       if (XC > 0.5 && XC < 0.9) {
-        circle(plotBorder, Point(XA, XB), 9, CV_RGB(0, 255, 0),
-               -1);  // free space
+        circle(plotBorder, cv::Point(XA, XB), 9, CV_RGB(0, 255, 0),
+               -1); // free space
       }
     }
   }
@@ -333,8 +333,8 @@ void chatterCallbackA(
 
   for (int i = 0; i < msg->markers.size(); i++) {
     for (int j = 0; j < msg->markers[i].points.size(); j++) {
-      // circle(plotBorder, Point(100,100), 5,  CV_RGB(142/1, 2/112, 220/121),
-      // -1);
+      // circle(plotBorder, cv::Point(100,100), 5,  CV_RGB(142/1, 2/112,
+      // 220/121), -1);
       float XA = msg->markers[i].points[j].y;
       float XB = msg->markers[i].points[j].x;
       float XC = msg->markers[i].points[j].z;
@@ -342,14 +342,14 @@ void chatterCallbackA(
       XA = multiplier * XA;
       XB = XB + 10;
       XB = multiplier * XB;
-      // std::cout << "Point: " << XA << "," << XB << std::endl;
+      // std::cout << "cv::Point: " << XA << "," << XB << std::endl;
       if (XC > 0.5 && XC < 0.9) {
         int foundBorderPoints = 0;
         int foundBorderPointsA = 0;
         for (int i1 = XB - 10; i1 < XB + 10; i1++) {
           for (int i2 = XA - 10; i2 < XA + 10; i2++) {
             if (i1 > 0 && i1 < yres && i2 > 0 && i2 < xres) {
-              Vec3b& color = plotBorder.at<Vec3b>(i1, i2);
+              cv::Vec3b &color = plotBorder.at<cv::Vec3b>(i1, i2);
               if ((color[2] < 250 && color[2] > 10)) {
                 foundBorderPoints++;
               }
@@ -363,10 +363,10 @@ void chatterCallbackA(
           // circle(plotBorder, Point(XA, XB), 4,  CV_RGB(0, 0, 255), -1);
         } else {
           if (foundBorderPointsA > 0) {
-            circle(plotBorder, Point(XA, XB), 9, CV_RGB(0, 255, 255),
-                   -1);  // OPEN SPACE ------- SHOULD BE CYAN --- BUT need to be
-                         // free to start the path finder
-            openSpaceSpots.push_back(Point(XA, XB));
+            circle(plotBorder, cv::Point(XA, XB), 9, CV_RGB(0, 255, 255),
+                   -1); // OPEN SPACE ------- SHOULD BE CYAN --- BUT need to be
+                        // free to start the path finder
+            openSpaceSpots.push_back(cv::Point(XA, XB));
           } else {
             // circle(plotBorder, Point(XA, XB), 8,  CV_RGB(0, 255, 0), -1);
             // //free space
@@ -392,9 +392,9 @@ void chatterCallbackA(
   // plotBorder.copyTo(plotBorder,BW);
 
   // PATH
-  int dividme = 12;  // 16;
+  int dividme = 12; // 16;
   SPoint source = {16, 6};
-  SPoint dest = {36, 78};  // SPoint dest = {43,78};
+  SPoint dest = {36, 78}; // SPoint dest = {43,78};
 
   // BOUNDING BOX
   if (source.y * dividme > boundBoxMaxX) {
@@ -411,18 +411,18 @@ void chatterCallbackA(
   }
   // expand based on downscaling
   float DownscaleOffset =
-      15 * 3;  // downscale pixels multipled by max used cirlces
+      15 * 3; // downscale pixels multipled by max used cirlces
   int boundBoxMinXA = boundBoxMinX - DownscaleOffset;
   int boundBoxMinYA = boundBoxMinY - DownscaleOffset;
   int boundBoxMaxXA = boundBoxMaxX + DownscaleOffset;
   int boundBoxMaxYA = boundBoxMaxY + DownscaleOffset;
-  cout << "bound Box = " << boundBoxMinXA << "," << boundBoxMinYA << ","
-       << boundBoxMaxXA << "," << boundBoxMaxYA << endl;
+  std::cout << "bound Box = " << boundBoxMinXA << "," << boundBoxMinYA << ","
+            << boundBoxMaxXA << "," << boundBoxMaxYA << std::endl;
 
   // Iterate paths for open area
   ////// PATH
 
-  Mat BWA;
+  cv::Mat BWA;
 
   // RESET CYAN to WHITE to enable free space in interface
   for (int i = 0; i < openSpaceSpots.size(); i++) {
@@ -431,43 +431,47 @@ void chatterCallbackA(
 
   // Mat cropped = plotBorder(Rect(boundBoxMinXA, boundBoxMinYA, boundBoxMaxXA,
   // boundBoxMaxYA));
-  Mat cropped = plotBorder(
-      Rect(boundBoxMinXA, boundBoxMinYA, boundBoxMaxXA, boundBoxMaxYA));
+  cv::Mat cropped = plotBorder(
+      cv::Rect(boundBoxMinXA, boundBoxMinYA, boundBoxMaxXA, boundBoxMaxYA));
   cv::imshow("cropped", cropped);
 
-  resize(plotBorder, BWA, Size(1280 / dividme, 720 / dividme));
+  resize(plotBorder, BWA, cv::Size(1280 / dividme, 720 / dividme));
   cvtColor(BWA, BWA, cv::COLOR_RGB2GRAY);
-  threshold(BWA, BWA, 254, 255, THRESH_BINARY);
+  threshold(BWA, BWA, 254, 255, cv::THRESH_BINARY);
   // bitwise_not(BWA,BWA);
   // int tester = BWA.at<uchar>(2, 2);
   // int tester1 = BWA.at<uchar>(22, 22);
   // int dist = BFS(BWA, source, dest, plotBorder, dividme);
-  // cout << "Shortest Path is " << tester << " , " << tester  << " dist " <<
-  // dist <<endl;//dist ;
-  cout << "openSpaceSpots.size() = " << openSpaceSpots.size() << endl;
-  vector<SPoint> startPoints;
+  // std::cout << "Shortest Path is " << tester << " , " << tester  << " dist "
+  // << dist <<endl;//dist ;
+  std::cout << "openSpaceSpots.size() = " << openSpaceSpots.size() << std::endl;
+  std::vector<SPoint> startPoints;
   for (int i = 0; i < openSpaceSpots.size();
-       i = i + 1) {  // (openSpaceSpots.size() / 10 ) ){
+       i = i + 1) { // (openSpaceSpots.size() / 10 ) ){
     startPoints.push_back(
         {openSpaceSpots[i].y / dividme, openSpaceSpots[i].x / dividme});
   }
   int dist = BFSMULTIPLE(BWA, source, startPoints, plotBorder, dividme);
 
   // PLOT BOUND BOX
-  line(plotBorder,
-       Point(boundBoxMinXA, boundBoxMinYA),  // curr.pathPoints[j] * divider,
-       Point(boundBoxMinXA, boundBoxMaxYA), Scalar(1.5, 110, 1), 2);
-  line(plotBorder,
-       Point(boundBoxMinXA, boundBoxMaxYA),  // curr.pathPoints[j] * divider,
-       Point(boundBoxMaxXA, boundBoxMaxYA), Scalar(1.5, 110, 1), 2);
-  line(plotBorder,
-       Point(boundBoxMaxXA, boundBoxMaxYA),  // curr.pathPoints[j] * divider,
-       Point(boundBoxMaxXA, boundBoxMinYA), Scalar(1.5, 110, 1), 2);
-  line(plotBorder,
-       Point(boundBoxMaxXA, boundBoxMinYA),  // curr.pathPoints[j] * divider,
-       Point(boundBoxMinXA, boundBoxMinYA), Scalar(1.5, 110, 1), 2);
-  circle(plotBorder, Point(source.y * dividme, source.x * dividme), 9,
-         CV_RGB(255, 1, 1), -1);
+  cv::line(
+      plotBorder,
+      cv::Point(boundBoxMinXA, boundBoxMinYA), // curr.pathPoints[j] * divider,
+      cv::Point(boundBoxMinXA, boundBoxMaxYA), cv::Scalar(1.5, 110, 1), 2);
+  cv::line(
+      plotBorder,
+      cv::Point(boundBoxMinXA, boundBoxMaxYA), // curr.pathPoints[j] * divider,
+      cv::Point(boundBoxMaxXA, boundBoxMaxYA), cv::Scalar(1.5, 110, 1), 2);
+  cv::line(
+      plotBorder,
+      cv::Point(boundBoxMaxXA, boundBoxMaxYA), // curr.pathPoints[j] * divider,
+      cv::Point(boundBoxMaxXA, boundBoxMinYA), cv::Scalar(1.5, 110, 1), 2);
+  cv::line(
+      plotBorder,
+      cv::Point(boundBoxMaxXA, boundBoxMinYA), // curr.pathPoints[j] * divider,
+      cv::Point(boundBoxMinXA, boundBoxMinYA), cv::Scalar(1.5, 110, 1), 2);
+  cv::circle(plotBorder, cv::Point(source.y * dividme, source.x * dividme), 9,
+             CV_RGB(255, 1, 1), -1);
 
   // SPoint sourceA = {6, 6};
   // SPoint destA = {58,68};
@@ -476,13 +480,13 @@ void chatterCallbackA(
   cv::imshow("OrigA", BWA);
   ////// END PATH
 
-  cv::imshow("Orig", plotBorder);  // cv::imshow("Orig", plotBorder);
+  cv::imshow("Orig", plotBorder); // cv::imshow("Orig", plotBorder);
   // cv::imshow("OrigA", BW);
-  waitKey(10);
+  cv::waitKey(10);
 }
 
 //////////// MAIN ///////////////
-int main(int argc, char** argv) {
+int main(int argc, char **argv) {
   ros::init(argc, argv, "pathfinding_node");
   ros::NodeHandle nh;
   ros::NodeHandle private_nh("~");
