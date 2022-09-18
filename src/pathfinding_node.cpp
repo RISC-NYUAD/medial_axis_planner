@@ -1,8 +1,8 @@
 #include <cmath>
-#include <octomap_msgs/Octomap.h>
-#include <octomap_msgs/conversions.h>
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
+#include <octomap_msgs/Octomap.h>
+#include <octomap_msgs/conversions.h>
 
 #include <ros/ros.h>
 #include <std_msgs/Int16.h>
@@ -37,11 +37,10 @@ const double kMapSliceZThickness = 0.2;
 const double kMinHeight = 0.0, kMaxHeight = 3.0;
 
 // Target coordinates in map frame
-const cv::Point2d targetPtMetric(5.0, 5.0);
+const cv::Point2d targetCoordMetric(5.0, 5.0);
 
 // Drone radius (in meters, for safety margins & visualizations)
 const double kDroneRadius = 0.2;
-
 
 // ##### Publishers #####
 image_transport::Publisher vis_pub;
@@ -61,9 +60,8 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   mapPtr->getMetricMax(xMax, yMax, zMax);
   mapPtr->getMetricMin(xMin, yMin, zMin);
   ROS_INFO("Bounds extracted");
-  ROS_INFO("Max: %.4f, %.4f, %.4f | Min: %.4f %.4f %.4f", xMax,
-           yMax, zMax, xMin, yMin,
-           zMin);
+  ROS_INFO("Max: %.4f, %.4f, %.4f | Min: %.4f %.4f %.4f", xMax, yMax, zMax,
+           xMin, yMin, zMin);
 
   // Obtain UAV location wrt to the map frame. Exit if cannot be retrieved
   geometry_msgs::Vector3 map2UAVPos;
@@ -77,8 +75,8 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
     ROS_INFO("Pose could not be computed. Exiting");
     return;
   }
-  ROS_INFO("Pose computed: x: %.4f, y: %.4f, z: %.4f", map2UAVPos.x, map2UAVPos.y,
-           map2UAVPos.z);
+  ROS_INFO("Pose computed: x: %.4f, y: %.4f, z: %.4f", map2UAVPos.x,
+           map2UAVPos.y, map2UAVPos.z);
 
   // Set bounds of the map to be extracted
   octomap::point3d maxBoundsZRestricted(
@@ -89,10 +87,16 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
           std::max(map2UAVPos.z - kMapSliceZThickness, kMinHeight));
 
   // Generate a colored repr of the map in 2D
+  // Maximum width / height depends on the target point as well
+  const double mapXMin = std::min(xMin, targetCoordMetric.x) - kResolution,
+               mapYMin = std::min(yMin, targetCoordMetric.y) - kResolution,
+               mapXMax = std::max(xMax, targetCoordMetric.x) + kResolution,
+               mapYMax = std::max(yMax, targetCoordMetric.y) + kResolution;
+
   const size_t width = static_cast<size_t>(
-                   std::ceil((xMax - xMin) / kResolution) + 1),
+                   std::ceil((mapXMax - mapXMin) / kResolution)),
                height = static_cast<size_t>(
-                   std::ceil((yMax - yMin) / kResolution) + 1);
+                   std::ceil((mapYMax - mapYMin) / kResolution));
 
   cv::Mat occupied(height, width, CV_8UC1, cv::Scalar(0)),
       free(height, width, CV_8UC1, cv::Scalar(0)),
@@ -106,15 +110,17 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
            end = mapPtr->end_leafs_bbx();
        it != end; ++it) {
     ++count;
-    size_t xCoord = static_cast<size_t>(std::round((it.getX() - xMin) / kResolution)),
-yCoord = static_cast<size_t>(std::round((it.getY() - yMin) / kResolution));
+    size_t xCoord = static_cast<size_t>(
+               std::round((it.getX() - mapXMin) / kResolution)),
+           yCoord = static_cast<size_t>(
+               std::round((it.getY() - mapYMin) / kResolution));
 
     // If logOdd > 0 -> Occupied. Otherwise free
-    if (it->getLogOdds() > 0){
+    if (it->getLogOdds() > 0) {
       occupied.at<uint8_t>(yCoord, xCoord) = 255;
       // Unmark free cells at this coordinate
       free.at<uint8_t>(yCoord, xCoord) = 0;
-      } else {
+    } else {
       if (occupied.at<uint8_t>(yCoord, xCoord) != 255)
         free.at<uint8_t>(yCoord, xCoord) = 255;
     }
@@ -127,11 +133,22 @@ yCoord = static_cast<size_t>(std::round((it.getY() - yMin) / kResolution));
   std::vector<cv::Mat> channels{zero, free, occupied};
   cv::merge(channels, visual);
 
-  size_t xCoordDrone = static_cast<size_t>(std::round((map2UAVPos.x - xMin) / kResolution)),
-yCoordDrone = static_cast<size_t>(std::round((map2UAVPos.y - yMin) / kResolution));
+  // Add drone location on map (blue circle)
+  size_t xCoordDrone = static_cast<size_t>(
+             std::round((map2UAVPos.x - mapXMin) / kResolution)),
+         yCoordDrone = static_cast<size_t>(
+             std::round((map2UAVPos.y - mapYMin) / kResolution));
   size_t radius = static_cast<size_t>(kDroneRadius / kResolution);
   cv::circle(visual, cv::Point(xCoordDrone, yCoordDrone), radius,
              cv::Scalar(255, 0, 0), 1);
+
+  // Add target location on map (purple)
+  size_t xCoordTarget = static_cast<size_t>(
+             std::round((targetCoordMetric.x - mapXMin) / kResolution)),
+         yCoordTarget = static_cast<size_t>(
+             std::round((targetCoordMetric.y - mapYMin) / kResolution));
+  cv::circle(visual, cv::Point(xCoordTarget, yCoordTarget), 0,
+             cv::Scalar(255, 0, 255), -1);
 
   // Correct orientation
   cv::flip(visual, visual, 0);
