@@ -93,9 +93,7 @@ int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
     float lastParentDist = curr.dist;
 
     // If we have reached the destination cell, we are done
-
     if (foundPathCount == dest.size() && foundPathCount > 0) {
-      // foundPathCount = dest.size();
 
       // plot history
       std::cout << "savedPaths.size() = "
@@ -124,7 +122,9 @@ int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
                 << "SAME " << dest.size() << std::endl;
       return curr.dist;
     }
+
     int foundPoints = 0;
+
     for (int i = 0; i < dest.size(); i++) {
       if (pt.x == dest[i].x && pt.y == dest[i].y) {
         for (int j = 0; j < curr.pathPoints.size(); j++) {
@@ -153,6 +153,7 @@ int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
         foundPoints++;
       }
     }
+
     if (dest.size() == savedPaths.size() &&
         savedPaths.size() > 0) {  // dest.size()){
       foundPathCount = dest.size();
