@@ -16,6 +16,7 @@
 #include "octomap/OcTree.h"
 #include "octomap/OcTreeKey.h"
 #include "opencv2/core/hal/interface.h"
+#include "opencv2/imgproc.hpp"
 #include "ros/duration.h"
 #include "ros/node_handle.h"
 #include "std_msgs/String.h"
@@ -39,11 +40,55 @@ const double kMinHeight = 0.0, kMaxHeight = 3.0;
 // Target coordinates in map frame
 const cv::Point2d targetCoordMetric(5.0, 5.0);
 
-// Drone radius (in meters, for safety margins & visualizations)
-const double kDroneRadius = 0.2;
+// Drone radius and safety margin (in meters). Occupied cells will be expanded
+// by kDroneRadius * 2 + kSafetymargin to avoid collisions
+const double kDroneRadius = 0.2, kSafetyMargin = 0.2;
 
 // ##### Publishers #####
 image_transport::Publisher vis_pub;
+
+// Extract the frontier points (in map image coordinate) given occupied and free
+// cells
+std::vector<cv::Point> findFrontierPoints(const cv::Mat &traversible,
+                                          const cv::Mat &occupiedSafe,
+                                          const cv::Point &droneCoordinates) {
+
+  // Find contours of traversible_ region
+  std::vector<std::vector<cv::Point>> contours;
+  std::vector<cv::Point> relevantContour;
+  std::vector<cv::Vec4i> hierarchy;
+  cv::findContours(traversible, contours, hierarchy, cv::RETR_EXTERNAL,
+                   cv::CHAIN_APPROX_NONE);
+
+  // Find which contour the drone is in
+  for (const auto &contour : contours) {
+    if (cv::pointPolygonTest(contour, droneCoordinates, false) > 0) {
+      relevantContour = contour;
+      break;
+    }
+  }
+
+  if (relevantContour.size() == 0) {
+    ROS_WARN("No contour points found");
+    return std::vector<cv::Point>();
+  }
+
+  // Frontier points are contours that are not adjacent to an occupied
+  // location Dilate with 3x3 kernel to extend occupied by 1 pixel
+  cv::Mat kernel =
+      cv::getStructuringElement(cv::MorphShapes::MORPH_ELLIPSE, cv::Size(3, 3));
+  cv::Mat occupiedContour;
+  cv::dilate(occupiedSafe, occupiedContour, kernel);
+
+  std::vector<cv::Point> frontier;
+
+  for (const auto &pt : relevantContour) {
+    if (occupiedContour.at<uchar>(pt) != 255)
+      frontier.push_back(pt);
+  }
+
+  return frontier;
+}
 
 void octomapCallback(const octomap_msgs::Octomap &msg) {
 
@@ -63,6 +108,12 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   ROS_INFO("Max: %.4f, %.4f, %.4f | Min: %.4f %.4f %.4f", xMax, yMax, zMax,
            xMin, yMin, zMin);
 
+  // Maximum width / height of 2D map depends on the target point as well
+  const double mapXMin = std::min(xMin, targetCoordMetric.x) - kResolution,
+               mapYMin = std::min(yMin, targetCoordMetric.y) - kResolution,
+               mapXMax = std::max(xMax, targetCoordMetric.x) + kResolution,
+               mapYMax = std::max(yMax, targetCoordMetric.y) + kResolution;
+
   // Obtain UAV location wrt to the map frame. Exit if cannot be retrieved
   geometry_msgs::Vector3 map2UAVPos;
   try {
@@ -75,8 +126,23 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
     ROS_INFO("Pose could not be computed. Exiting");
     return;
   }
+
+  // Coordinates in the image frame
+  size_t xCoordDrone = static_cast<size_t>(
+             std::round((map2UAVPos.x - mapXMin) / kResolution)),
+         yCoordDrone = static_cast<size_t>(
+             std::round((map2UAVPos.y - mapYMin) / kResolution));
+  cv::Point coordDrone(xCoordDrone, yCoordDrone);
+
   ROS_INFO("Pose computed: x: %.4f, y: %.4f, z: %.4f", map2UAVPos.x,
            map2UAVPos.y, map2UAVPos.z);
+
+  // Safety radius in image frame
+  const int droneSafetyRadius =
+      std::ceil((kDroneRadius * 2.0 + kSafetyMargin) / kResolution);
+  cv::Mat kernelSafety =
+      cv::getStructuringElement(cv::MorphShapes::MORPH_ELLIPSE,
+                                cv::Size(droneSafetyRadius, droneSafetyRadius));
 
   // Set bounds of the map to be extracted
   octomap::point3d maxBoundsZRestricted(
@@ -86,13 +152,7 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
           xMin - 1.0, yMin - 1.0,
           std::max(map2UAVPos.z - kMapSliceZThickness, kMinHeight));
 
-  // Generate a colored repr of the map in 2D
-  // Maximum width / height depends on the target point as well
-  const double mapXMin = std::min(xMin, targetCoordMetric.x) - kResolution,
-               mapYMin = std::min(yMin, targetCoordMetric.y) - kResolution,
-               mapXMax = std::max(xMax, targetCoordMetric.x) + kResolution,
-               mapYMax = std::max(yMax, targetCoordMetric.y) + kResolution;
-
+  // Project the 3D bbx region into a 2D map (occupied / free)
   const size_t width = static_cast<size_t>(
                    std::ceil((mapXMax - mapXMin) / kResolution)),
                height = static_cast<size_t>(
@@ -101,9 +161,13 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   cv::Mat occupied(height, width, CV_8UC1, cv::Scalar(0)),
       free(height, width, CV_8UC1, cv::Scalar(0)),
       zero(height, width, CV_8UC1, cv::Scalar(0));
-  size_t count = 0;
 
-  // Iterate over bounding-box-restricted points & update occupied / free
+  // Drone coordinate (and surrounding radius) is occupied
+  free.at<uint8_t>(yCoordDrone, xCoordDrone) = 255;
+  cv::dilate(free, free, kernelSafety);
+
+  // iterate over bounding-box-restricted points & update occupied / free
+  size_t count = 0;
   for (octomap::ColorOcTree::leaf_bbx_iterator
            it = mapPtr->begin_leafs_bbx(minBoundsZRestricted,
                                         maxBoundsZRestricted),
@@ -118,26 +182,41 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
     // If logOdd > 0 -> Occupied. Otherwise free
     if (it->getLogOdds() > 0) {
       occupied.at<uint8_t>(yCoord, xCoord) = 255;
-      // Unmark free cells at this coordinate
-      free.at<uint8_t>(yCoord, xCoord) = 0;
     } else {
-      if (occupied.at<uint8_t>(yCoord, xCoord) != 255)
-        free.at<uint8_t>(yCoord, xCoord) = 255;
+      free.at<uint8_t>(yCoord, xCoord) = 255;
     }
   }
+  ROS_INFO("Total pts in bounding volume: %d", static_cast<int>(count));
 
-  ROS_INFO("Total pts in range: %d", static_cast<int>(count));
+  // Perform morphological closing on free map to eliminate small holes
+  cv::Mat kernel3x3 =
+      cv::getStructuringElement(cv::MorphShapes::MORPH_RECT, cv::Size(3, 3));
+  cv::morphologyEx(free, free, cv::MORPH_CLOSE, kernel3x3);
+
+  // Dilate occupied cells to provide buffer for collision
+  cv::Mat occupiedSafe, occupiedSafeMask;
+  cv::dilate(occupied, occupiedSafe, kernelSafety);
+  cv::threshold(occupiedSafe, occupiedSafeMask, 100, 1, cv::THRESH_BINARY_INV);
+
+  // Traversible: min. distance to an obstacle is 2 drone radii away
+  // Traversible safe: min. dist is ~3 drone radii
+  cv::Mat traversible = free.mul(occupiedSafeMask);
+
+  // Extract frontier points
+  std::vector<cv::Point> frontier =
+      findFrontierPoints(traversible, occupiedSafe, coordDrone);
 
   // ##### Visualization #####
+
+  // Base image
+  // Traversible region -> Blue (appears as cyan)
+  // Free region -> Green (yellow / cyan as well)
+  // Occupied region -> Red (some yellow)
   cv::Mat visual;
-  std::vector<cv::Mat> channels{zero, free, occupied};
+  std::vector<cv::Mat> channels{traversible, free, occupied};
   cv::merge(channels, visual);
 
   // Add drone location on map (blue circle)
-  size_t xCoordDrone = static_cast<size_t>(
-             std::round((map2UAVPos.x - mapXMin) / kResolution)),
-         yCoordDrone = static_cast<size_t>(
-             std::round((map2UAVPos.y - mapYMin) / kResolution));
   size_t radius = static_cast<size_t>(kDroneRadius / kResolution);
   cv::circle(visual, cv::Point(xCoordDrone, yCoordDrone), radius,
              cv::Scalar(255, 0, 0), 1);
@@ -149,6 +228,10 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
              std::round((targetCoordMetric.y - mapYMin) / kResolution));
   cv::circle(visual, cv::Point(xCoordTarget, yCoordTarget), 0,
              cv::Scalar(255, 0, 255), -1);
+
+  // Mark frontier points - Gray
+  for (const auto &pt : frontier)
+    cv::circle(visual, pt, 0, cv::Scalar(100, 100, 100), 1);
 
   // Correct orientation
   cv::flip(visual, visual, 0);
