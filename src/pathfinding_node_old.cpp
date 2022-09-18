@@ -1,40 +1,3 @@
-/**
- * octomap_server: A Tool to serve 3D OctoMaps in ROS (binary and as
- * visualization) (inspired by the ROS map_saver)
- * @author A. Hornung, University of Freiburg, Copyright (C) 2009 - 2012.
- * @see http://octomap.sourceforge.net/
- * License: BSD
- */
-
-/*
- * Copyright (c) 2009-2012, A. Hornung, University of Freiburg
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- *     * Neither the name of the University of Freiburg nor the names of its
- *       contributors may be used to endorse or promote products derived from
- *       this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
 #include <octomap_msgs/Octomap.h>
 #include <octomap_msgs/conversions.h>
 #include <octomap_server/OctomapServer.h>
@@ -160,10 +123,6 @@ int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
       std::cout << "dest.size() = "
                 << "SAME " << dest.size() << std::endl;
       return curr.dist;
-    } else {
-      // savedPaths.clear();//clear saved if found new
-      // foundPathCount = dest.size();
-      // cout << "dest.size() = " << dest.size() << endl;
     }
     int foundPoints = 0;
     for (int i = 0; i < dest.size(); i++) {
@@ -194,8 +153,6 @@ int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
         foundPoints++;
       }
     }
-    // cout << "dest.size() = " << dest.size() << " foundPoints = " <<
-    // foundPoints << " savedPaths size = " << savedPaths.size() << endl;
     if (dest.size() == savedPaths.size() &&
         savedPaths.size() > 0) {  // dest.size()){
       foundPathCount = dest.size();
@@ -211,10 +168,6 @@ int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
       toggle = 0;  // 2;
       countrToggle = 8;
     }
-    // else{
-    //	toggle=0;
-    //	countrToggle = 3;
-    //}
 
     for (int i = 0; i < countrToggle; i++) {
       int row = pt.x + rowNum[i];
@@ -247,10 +200,6 @@ int BFSMULTIPLE(cv::Mat mat, SPoint src, std::vector<SPoint> dest,
     }
   }
 
-  // cv::imshow("Orig", plotBorder);
-  cv::waitKey(10);
-
-  // Return -1 if destination cannot be reached
   return -1;
 }
 
@@ -271,8 +220,6 @@ void chatterCallback(
 
   for (int i = 0; i < msg->markers.size(); i++) {
     for (int j = 0; j < msg->markers[i].points.size(); j++) {
-      // circle(plotBorder, Point(100,100), 5,  CV_RGB(142/1, 2/112, 220/121),
-      // -1);
       float XA = msg->markers[i].points[j].y;
       float XB = msg->markers[i].points[j].x;
       float XC = msg->markers[i].points[j].z;
@@ -280,7 +227,6 @@ void chatterCallback(
       XA = multiplier * XA;
       XB = XB + 10;
       XB = multiplier * XB;
-      // std::cout << "Point: " << XA << "," << XB << std::endl;
       if (XC > 0.5 && XC < 0.9) {
         circle(plotBorder, cv::Point(XA, XB), 10, CV_RGB(142, 0, 0), -1);  // 11
 
@@ -328,8 +274,6 @@ void chatterCallbackA(
 
   for (int i = 0; i < msg->markers.size(); i++) {
     for (int j = 0; j < msg->markers[i].points.size(); j++) {
-      // circle(plotBorder, cv::Point(100,100), 5,  CV_RGB(142/1, 2/112,
-      // 220/121), -1);
       float XA = msg->markers[i].points[j].y;
       float XB = msg->markers[i].points[j].x;
       float XC = msg->markers[i].points[j].z;
@@ -337,7 +281,6 @@ void chatterCallbackA(
       XA = multiplier * XA;
       XB = XB + 10;
       XB = multiplier * XB;
-      // std::cout << "cv::Point: " << XA << "," << XB << std::endl;
       if (XC > 0.5 && XC < 0.9) {
         int foundBorderPoints = 0;
         int foundBorderPointsA = 0;
@@ -362,29 +305,10 @@ void chatterCallbackA(
                    -1);  // OPEN SPACE ------- SHOULD BE CYAN --- BUT need to be
                          // free to start the path finder
             openSpaceSpots.push_back(cv::Point(XA, XB));
-          } else {
-            // circle(plotBorder, Point(XA, XB), 8,  CV_RGB(0, 255, 0), -1);
-            // //free space
-          }
         }
       }
     }
   }
-
-  // PLOT target
-  // circle(plotBorder, Point(100, 400), 60,  CV_RGB(0, 155, 255), -1);//OPEN
-  // SPACE
-
-  // Mat BW;
-  // resize(plotBorder, BW,Size(1280/4, 720/4));
-  // cvtColor(BW, BW,cv::COLOR_RGB2GRAY);
-  // threshold(BW,BW,254, 255, THRESH_BINARY);
-  // cv::imshow("OrigA1", BW);
-  // cv::ximgproc::thinning(BW,BW,cv::ximgproc::THINNING_GUOHALL);
-  // //cv::ximgproc::THINNING_ZHANGSUEN, THINNING_GUOHALL bitwise_not(BW,BW);
-  // resize(BW, BW,Size(1280, 720));
-  // cv::bitwise_and(plotBorder, plotBorder, plotBorder, BW);
-  // plotBorder.copyTo(plotBorder,BW);
 
   // PATH
   int dividme = 12;  // 16;
@@ -424,8 +348,6 @@ void chatterCallbackA(
     circle(plotBorder, openSpaceSpots[i], 9, CV_RGB(255, 255, 255), -1);
   }
 
-  // Mat cropped = plotBorder(Rect(boundBoxMinXA, boundBoxMinYA, boundBoxMaxXA,
-  // boundBoxMaxYA));
   cv::Mat cropped = plotBorder(
       cv::Rect(boundBoxMinXA, boundBoxMinYA, boundBoxMaxXA, boundBoxMaxYA));
   cv::imshow("cropped", cropped);
@@ -433,12 +355,7 @@ void chatterCallbackA(
   resize(plotBorder, BWA, cv::Size(1280 / dividme, 720 / dividme));
   cvtColor(BWA, BWA, cv::COLOR_RGB2GRAY);
   threshold(BWA, BWA, 254, 255, cv::THRESH_BINARY);
-  // bitwise_not(BWA,BWA);
-  // int tester = BWA.at<uchar>(2, 2);
-  // int tester1 = BWA.at<uchar>(22, 22);
-  // int dist = BFS(BWA, source, dest, plotBorder, dividme);
-  // std::cout << "Shortest Path is " << tester << " , " << tester  << " dist "
-  // << dist <<endl;//dist ;
+
   std::cout << "openSpaceSpots.size() = " << openSpaceSpots.size() << std::endl;
   std::vector<SPoint> startPoints;
   for (int i = 0; i < openSpaceSpots.size();
@@ -468,10 +385,6 @@ void chatterCallbackA(
   cv::circle(plotBorder, cv::Point(source.y * dividme, source.x * dividme), 9,
              CV_RGB(255, 1, 1), -1);
 
-  // SPoint sourceA = {6, 6};
-  // SPoint destA = {58,68};
-  // int distA = BFS(BWA, sourceA, destA, plotBorder, dividme);
-
   cv::imshow("OrigA", BWA);
   ////// END PATH
 
@@ -480,61 +393,5 @@ void chatterCallbackA(
   cv::waitKey(10);
 }
 
-void octomapCallback(const octomap_msgs::Octomap &msg) {
-  // Convert from message to OcTree
-  octomap::OcTree *mapPtr = new octomap::OcTree(msg.resolution);
-  octomap::AbstractOcTree *msgTree = octomap_msgs::binaryMsgToMap(msg);
-  mapPtr = dynamic_cast<octomap::OcTree *>(msgTree);
-
-  octomap::point3d maxBounds = mapPtr->getBBXMax(),
-                   minBounds = mapPtr->getBBXMin();
-
-  ROS_INFO("Max: %.4f, %.4f, %.4f | Min: %.4f %.4f %.4f", maxBounds.x(),
-           maxBounds.y(), maxBounds.z(), minBounds.x(), minBounds.y(),
-           minBounds.z());
-
-  return;
-}
-
 //////////// MAIN ///////////////
-int main(int argc, char **argv) {
-  const std::string nodeName = "pathfinding_node";
-  ros::init(argc, argv, nodeName);
-  ros::NodeHandle nh;
-  ros::NodeHandle private_nh("~");
-
-  // // v0.1
-  // cv::Mat plotBorderA(yres, xres, CV_8UC3, cv::Scalar(1, 1, 1));
-  // plotBorderA.copyTo(plotBorder);
-
-  // ROS_INFO("[%s]", nodeName.c_str());
-
-  // ros::Publisher chatter_pub = nh.advertise<std_msgs::String>("chatter",
-  // 1000);
-
-  // ros::Rate loop_rate(10);
-  // int count = 0;
-
-  // ros::Subscriber sub =
-  //     nh.subscribe("/occupied_cells_vis_array", 1000, chatterCallback);
-  // ros::Subscriber subA =
-  //     nh.subscribe("/free_cells_vis_array", 1000, chatterCallbackA);
-
-  ros::Subscriber octomapMsgSubscriber =
-      nh.subscribe("/rtabmap/octomap_binary", 1, octomapCallback);
-
-  ros::spin();
-
-  // while (ros::ok()) {
-  //   std_msgs::String msg;
-  //   std::stringstream ss;
-  //   ss << "hello world " << count;
-  //   msg.data = ss.str();
-  //   chatter_pub.publish(msg);
-  //   count++;
-
-  //   ros::spinOnce();
-  //   loop_rate.sleep();
-  // }
-  return 0;
-}
+int main(int argc, char **argv) {}
