@@ -45,3 +45,4 @@ include_directories(
 
 add_executable(pathfinding_node src/pathfinding_node.cpp)
 target_link_libraries(pathfinding_node ${catkin_LIBRARIES})
+# target_compile_options(pathfinding_node PRIVATE -Wall -Wextra -pedantic -Werror)
