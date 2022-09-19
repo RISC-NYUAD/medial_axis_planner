@@ -509,7 +509,7 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // Find skeleton point closest to the selected frontier point with LoS
   // visibility
-  cv::Point selectedSkeletonPt = skeletonPts[0];
+  cv::Point exitSkeletonPt = skeletonPts[0];
   float currentDistance = std::numeric_limits<float>::max();
 
   std::vector<cv::Point> skeletonToFrontier;
@@ -528,13 +528,37 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
         continue;
       } else {
         currentDistance = dist;
-        selectedSkeletonPt = pt;
+        exitSkeletonPt = pt;
         skeletonToFrontier = lineOfSightPath;
       }
     }
   }
 
-  // Compute the path along the skeleton reaching to the
+  // Find skeleton point closest to the drone with LoS visibility
+  cv::Point entrySkeletonPt = skeletonPts[0];
+  currentDistance = std::numeric_limits<float>::max();
+
+  std::vector<cv::Point> uavToSkeleton;
+
+  for (const cv::Point &pt : skeletonPts) {
+    cv::Point diff = pt - coordDrone;
+    float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+    if (dist < currentDistance) {
+
+      // LoS needed only if the distance is smaller
+      std::vector<cv::Point> lineOfSightPath =
+          computeLineOfSightPath(traversible, pt, coordDrone);
+
+      // If LoS path is empty, then there is no viable path
+      if (lineOfSightPath.empty()) {
+        continue;
+      } else {
+        currentDistance = dist;
+        entrySkeletonPt = pt;
+        uavToSkeleton = lineOfSightPath;
+      }
+    }
+  }
 
   // ##### Visualization #####
 
@@ -587,6 +611,10 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
     cv::circle(visual, pt, 0, cv::Scalar(255, 255, 255), 1);
 
   // ### Paths ###
+
+  // UAV -> Skeleton (blue-ish)
+  for (const auto &pt : uavToSkeleton)
+    cv::circle(visual, pt, 0, cv::Scalar(255, 155, 0), 1);
 
   // Skeleton -> frontier (orange)
   for (const auto &pt : skeletonToFrontier)
