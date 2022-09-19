@@ -113,22 +113,12 @@ std::vector<cv::Point> findFrontierPoints(const cv::Mat &traversible,
   return frontier;
 }
 
-// Queue node to store point and its distance
-struct queueNode {
-  cv::Point pt;
-  uint16_t dist;
-};
-
 // Compute the cost map from target point to all frontier points using
 // breadth-first search
 cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
                        const cv::Mat &traversible, const cv::Mat &occupiedSafe,
-                       const cv::Point &targetCoord,
+                       const std::vector<cv::Point> &targetCoordinates,
                        const cv::Point &droneCoordinates) {
-
-  // Extract simplified contour of traversible region the drone is in
-  std::vector<cv::Point> contourTraversible = extractTraversibleContour(
-      traversible, occupiedSafe, droneCoordinates, true);
 
   // Extract simplified contour of occupied safe region
   // Find contours of traversible_ region
@@ -145,7 +135,7 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
     contourOccupiedSafe.insert(contourOccupiedSafe.end(), contour.begin(),
                                contour.end());
 
-  if (contourTraversible.size() == 0 or contourOccupiedSafe.size() == 0) {
+  if (contourOccupiedSafe.size() == 0) {
     ROS_ERROR("Cost map contour issues");
     return cv::Mat();
   }
@@ -153,14 +143,13 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
   // Combine all points for convex hull calculation
   std::vector<cv::Point> hullPointSet;
   hullPointSet.insert(hullPointSet.end(), frontier.begin(), frontier.end());
-  hullPointSet.insert(hullPointSet.end(), contourTraversible.begin(),
-                      contourTraversible.end());
   hullPointSet.insert(hullPointSet.end(), contourOccupiedSafe.begin(),
                       contourOccupiedSafe.end());
-  hullPointSet.push_back(targetCoord);
+  hullPointSet.insert(hullPointSet.end(), targetCoordinates.begin(),
+                      targetCoordinates.end());
 
-  ROS_INFO("Num. pts for hull calculation: %d",
-           static_cast<int>(hullPointSet.size()));
+  // ROS_INFO("Num. pts for hull calculation: %d",
+  //          static_cast<int>(hullPointSet.size()));
 
   std::vector<cv::Point> hull;
   cv::convexHull(hullPointSet, hull);
@@ -184,41 +173,38 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
   cv::Mat distances(allowedRegion.rows, allowedRegion.cols, CV_16UC1,
                     cv::Scalar(std::numeric_limits<uint16_t>::max()));
 
-  // Mat to keep track of visited nodes
-  cv::Mat visited(allowedRegion.rows, allowedRegion.cols, CV_8SC1,
-                  cv::Scalar(0));
-
   // Create a queue of cv coordinates for BFS search
-  std::queue<queueNode> pixelQueue;
+  std::queue<cv::Point> pixelQueue;
 
-  // First pixel to check is the target with distance 0
-  pixelQueue.push(queueNode{targetCoord, 0});
+  // Target coordinates have distance 0
+  for (const cv::Point &coord : targetCoordinates) {
+    pixelQueue.push(coord);
+    distances.at<uint16_t>(coord.y, coord.x) = 0;
+  }
 
   // Count number of frontier points reached during BFS, to terminate early
   size_t numFrontierPointsReached = 0;
   const size_t numFrontierPoints = frontier.size();
 
   while (!pixelQueue.empty()) {
-    queueNode currentPx = pixelQueue.front();
+    cv::Point currentPx = pixelQueue.front();
     // ROS_INFO("x: %d, y:%d", currentPx.pt.x, currentPx.pt.y);
 
-    // Change distance of the given node with currDist & mark visited
-    distances.at<ushort>(currentPx.pt.y, currentPx.pt.x) = currentPx.dist;
-
     // Add neighboring points (in 8-neighborhood) if they are
-    // -> within image
-    // -> allowed to be traversed
+    // -> within image (needed so that convex hull check can be performed
+    // -> within convex hull
     // -> haven't been visited
     // -> not in occupiedSafe
     for (size_t i = 0; i < 8; ++i) {
-      cv::Point neighborPt(currentPx.pt.x + neighborX[i],
-                           currentPx.pt.y + neighborY[i]);
+      cv::Point neighborPt(currentPx.x + neighborX[i],
+                           currentPx.y + neighborY[i]);
 
       bool ptIsInImage = imageBounds.contains(neighborPt);
       bool ptIsAllowed =
           allowedRegion.at<uint8_t>(neighborPt.y, neighborPt.x) == 255;
       bool ptIsNotVisited =
-          visited.at<uint8_t>(neighborPt.y, neighborPt.x) == 0;
+          distances.at<uint16_t>(neighborPt.y, neighborPt.x) ==
+          std::numeric_limits<uint16_t>::max();
       bool ptIsNotInOccupiedSafe =
           occupiedSafe.at<uint8_t>(neighborPt.y, neighborPt.x) == 0;
 
@@ -230,18 +216,19 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
       if (ptIsInImage && ptIsAllowed && ptIsNotVisited &&
           ptIsNotInOccupiedSafe) {
 
-        uint16_t neighborDist = currentPx.dist + 1;
-        pixelQueue.push(queueNode{neighborPt, neighborDist});
+        uint16_t currentDist = distances.at<uint16_t>(currentPx.y, currentPx.x);
+        uint16_t neighborDist = currentDist + 1;
 
-        // Mark visited now to prevent adding adjacent pixels multiple times
-        visited.at<uint8_t>(neighborPt.y, neighborPt.x) = 1;
+        // Set distance early to mark visited
+        distances.at<uint16_t>(neighborPt.y, neighborPt.x) = neighborDist;
+        pixelQueue.push(neighborPt);
+
+        // If it is a frontier node, increment the counter
+        for (const auto &pt : frontier)
+          if (currentPx == pt)
+            ++numFrontierPointsReached;
       }
     }
-
-    // If it is a frontier node, increment the counter
-    for (const auto &pt : frontier)
-      if (currentPx.pt == pt)
-        ++numFrontierPointsReached;
 
     // Remove the currently processed node
     pixelQueue.pop();
@@ -374,8 +361,9 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
       findFrontierPoints(traversible, occupiedSafe, coordDrone);
 
   // Calculate distance map
+  std::vector<cv::Point> targetPoints {coordTarget};
   cv::Mat costMap = computeCostMap(frontier, traversible, occupiedSafe,
-                                   coordTarget, coordDrone);
+                                   targetPoints, coordDrone);
 
   // Return if cost map is empty
   if (costMap.empty()) {
@@ -400,11 +388,10 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // Remove overlapping costmap from traversible area
   cv::Mat traversibleInverseMask;
-  cv::threshold(traversible, traversibleInverseMask,
-                100, 1,
+  cv::threshold(traversible, traversibleInverseMask, 100, 1,
                 cv::THRESH_BINARY_INV);
   costMapVis = costMapVis.mul(traversibleInverseMask);
-  
+
   // cv::cvtColor(costMapVis8bit, costMapVis8bit, cv::COLOR_GRAY2BGR);
   // sensor_msgs::ImagePtr costMapMsg =
   //     cv_bridge::CvImage(std_msgs::Header(), "bgr8", costMapVis8bit)
