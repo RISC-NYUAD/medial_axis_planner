@@ -242,6 +242,64 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
   return distances;
 }
 
+std::vector<cv::Point> computeShortestPathFromCostmap(const cv::Mat &costMap,
+                                                      const cv::Point &start) {
+  // CANNOT FIND DISTANCE TO A PARTICULAR TARGET POINT. ONLY THE SHORTEST PATH
+  // TO THE CLOSEST PATH POINT
+  // DOES NOT INCLUDE start IN THE RETURNED PATH
+
+  std::vector<cv::Point> path;
+
+  // Ensure that start point has an assigned distance (reached)
+  uint16_t currentDist = costMap.at<uint16_t>(start.y, start.x);
+
+  if (currentDist == std::numeric_limits<uint16_t>::max()) {
+    ROS_WARN(
+        "Start (%d, %d) point is has not been reached. Cannot compute path",
+        start.x, start.y);
+    return path;
+  }
+
+  // Used in checking that the neighbor is in the image
+  cv::Rect imageBounds(cv::Point(), costMap.size());
+
+  // Initialize
+  cv::Point currentPt = start, minDistPt = start;
+
+  while (currentDist != 0) {
+
+    // Iterate over all neighbors. One with shortest distance is added to path
+    for (size_t i = 0; i < 8; ++i) {
+      cv::Point neighbor(currentPt.x + neighborX[i],
+                         currentPt.y + neighborY[i]);
+      if (!imageBounds.contains(neighbor))
+        continue;
+
+      uint16_t neighborDist = costMap.at<uint16_t>(neighbor.y, neighbor.x);
+
+      if (neighborDist < currentDist) {
+        currentDist = neighborDist;
+        minDistPt = neighbor;
+      }
+    }
+
+    // Add minimum distance point to the path
+    path.push_back(minDistPt);
+
+    // DEBUG: currentPt should not be equal to minDistPt. Distances are
+    // monotonic
+    if (currentPt == minDistPt) {
+      ROS_ERROR("Path computation error. Investigate");
+      return std::vector<cv::Point>();
+    }
+
+    // Update currentPt with minDistPt
+    currentPt = minDistPt;
+  }
+
+  return path;
+}
+
 void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // Convert from message to OcTree
@@ -360,8 +418,11 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   std::vector<cv::Point> frontier =
       findFrontierPoints(traversible, occupiedSafe, coordDrone);
 
+  if (frontier.empty())
+    return;
+
   // Calculate distance map
-  std::vector<cv::Point> targetPoints {coordTarget};
+  std::vector<cv::Point> targetPoints{coordTarget};
   cv::Mat costMap = computeCostMap(frontier, traversible, occupiedSafe,
                                    targetPoints, coordDrone);
 
@@ -370,6 +431,17 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
     ROS_ERROR("Cost map empty. Investigate");
     return;
   }
+
+  // Compute path from the frontier point with the shortest distance
+  cv::Point selectedFrontierPt = frontier[0];
+  for (const cv::Point &pt : frontier) {
+    if (costMap.at<uint16_t>(pt.y, pt.x) <
+        costMap.at<uint16_t>(selectedFrontierPt.y, selectedFrontierPt.x)) {
+      selectedFrontierPt = pt;
+    }
+  }
+  std::vector<cv::Point> shortestPathFromFrontier =
+      computeShortestPathFromCostmap(costMap, selectedFrontierPt);
 
   // ##### Visualization #####
 
@@ -419,6 +491,10 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   // Mark frontier points - White
   for (const auto &pt : frontier)
     cv::circle(visual, pt, 0, cv::Scalar(255, 255, 255), 1);
+
+  // Mark shortest path to target from frontier - Yellow
+  for (const auto &pt : shortestPathFromFrontier)
+    cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
 
   // Correct orientation
   cv::flip(visual, visual, 0);
