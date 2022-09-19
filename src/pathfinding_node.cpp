@@ -1,19 +1,21 @@
-#include <cmath>
 #include <cv_bridge/cv_bridge.h>
+#include <geometry_msgs/PoseArray.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <geometry_msgs/Vector3.h>
 #include <image_transport/image_transport.h>
-#include <limits>
 #include <octomap_msgs/Octomap.h>
 #include <octomap_msgs/conversions.h>
-
-#include <queue>
 #include <ros/ros.h>
 #include <std_msgs/Int16.h>
 #include <tf2_ros/transform_listener.h>
 
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <opencv2/opencv.hpp>
 #include <opencv2/ximgproc.hpp>
+#include <queue>
 
 #include "geometry_msgs/Quaternion.h"
 #include "octomap/AbstractOcTree.h"
@@ -30,9 +32,6 @@
 #include "tf2/exceptions.h"
 #include "tf2_ros/buffer.h"
 #include "visualization_msgs/MarkerArray.h"
-#include <geometry_msgs/PoseArray.h>
-#include <geometry_msgs/TransformStamped.h>
-#include <geometry_msgs/Vector3.h>
 
 tf2_ros::Buffer tfBuffer;
 
@@ -56,12 +55,11 @@ const double kDroneRadius = 0.2, kSafetyMargin = 0.2;
 const double kNavigationHeight = 1.0;
 
 // ##### Publishers #####
-image_transport::Publisher debugVis; // Debug visualization
-ros::Publisher pathPub;              // Publishes path from uav to frontier
+image_transport::Publisher debugVis;  // Debug visualization
+ros::Publisher pathPub;               // Publishes path from uav to frontier
 
 // Compute 8-neighbors of a given point
-std::vector<cv::Point> computeNeighbors(const cv::Point &pt) {
-
+std::vector<cv::Point> computeNeighbors(const cv::Point& pt) {
   // Neighborhood order in x and y: From top, clockwise
   const int neighborX[8] = {0, 1, 1, 1, 0, -1, -1, -1},
             neighborY[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
@@ -76,11 +74,10 @@ std::vector<cv::Point> computeNeighbors(const cv::Point &pt) {
 }
 
 // Extract the contour of traversible region that the drone is in
-std::vector<cv::Point>
-extractTraversibleContour(const cv::Mat &traversible,
-                          const cv::Mat &occupiedSafe,
-                          const cv::Point &droneCoordinates, bool simplify) {
-
+std::vector<cv::Point> extractTraversibleContour(const cv::Mat& traversible,
+                                                 const cv::Mat& occupiedSafe,
+                                                 const cv::Point& droneCoordinates,
+                                                 bool simplify) {
   // Find contours of traversible_ region
   std::vector<std::vector<cv::Point>> contours;
   std::vector<cv::Point> relevantContour;
@@ -94,7 +91,7 @@ extractTraversibleContour(const cv::Mat &traversible,
                      cv::CHAIN_APPROX_NONE);
 
   // Select the contour the drone is in
-  for (const auto &contour : contours) {
+  for (const auto& contour : contours) {
     if (cv::pointPolygonTest(contour, droneCoordinates, false) > 0) {
       relevantContour = contour;
       break;
@@ -106,12 +103,11 @@ extractTraversibleContour(const cv::Mat &traversible,
 
 // Extract the frontier points (in map image coordinate) given occupied and free
 // cells
-std::vector<cv::Point> findFrontierPoints(const cv::Mat &traversible,
-                                          const cv::Mat &occupiedSafe,
-                                          const cv::Point &droneCoordinates) {
-
-  std::vector<cv::Point> contour = extractTraversibleContour(
-      traversible, occupiedSafe, droneCoordinates, false);
+std::vector<cv::Point> findFrontierPoints(const cv::Mat& traversible,
+                                          const cv::Mat& occupiedSafe,
+                                          const cv::Point& droneCoordinates) {
+  std::vector<cv::Point> contour =
+      extractTraversibleContour(traversible, occupiedSafe, droneCoordinates, false);
   if (contour.size() == 0) {
     ROS_WARN("No contour points found");
     return std::vector<cv::Point>();
@@ -127,7 +123,7 @@ std::vector<cv::Point> findFrontierPoints(const cv::Mat &traversible,
 
   std::vector<cv::Point> frontier;
 
-  for (const auto &pt : contour) {
+  for (const auto& pt : contour) {
     if (occupiedContour.at<uchar>(pt) != 255)
       frontier.push_back(pt);
   }
@@ -137,23 +133,23 @@ std::vector<cv::Point> findFrontierPoints(const cv::Mat &traversible,
 
 // Compute the cost map from target point to all frontier points using
 // breadth-first search
-cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
-                       const cv::Mat &traversible, const cv::Mat &occupiedSafe,
-                       const std::vector<cv::Point> &targetCoordinates,
-                       const cv::Point &droneCoordinates) {
-
+cv::Mat computeCostMap(const std::vector<cv::Point>& frontier,
+                       const cv::Mat& traversible,
+                       const cv::Mat& occupiedSafe,
+                       const std::vector<cv::Point>& targetCoordinates,
+                       const cv::Point& droneCoordinates) {
   // Extract simplified contour of occupied safe region
   // Find contours of traversible_ region
   std::vector<std::vector<cv::Point>> contoursOccupiedSafe;
   std::vector<cv::Point> relevantContour;
   std::vector<cv::Vec4i> hierarchy;
 
-  cv::findContours(occupiedSafe, contoursOccupiedSafe, hierarchy,
-                   cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+  cv::findContours(occupiedSafe, contoursOccupiedSafe, hierarchy, cv::RETR_EXTERNAL,
+                   cv::CHAIN_APPROX_SIMPLE);
 
   // Combine contours from occupied safe
   std::vector<cv::Point> contourOccupiedSafe;
-  for (std::vector<cv::Point> &contour : contoursOccupiedSafe)
+  for (std::vector<cv::Point>& contour : contoursOccupiedSafe)
     contourOccupiedSafe.insert(contourOccupiedSafe.end(), contour.begin(),
                                contour.end());
 
@@ -199,7 +195,7 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
   std::queue<cv::Point> pixelQueue;
 
   // Target coordinates have distance 0
-  for (const cv::Point &coord : targetCoordinates) {
+  for (const cv::Point& coord : targetCoordinates) {
     pixelQueue.push(coord);
     distances.at<uint16_t>(coord.y, coord.x) = 0;
   }
@@ -217,14 +213,11 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
     // -> within convex hull
     // -> haven't been visited
     // -> not in occupiedSafe
-    for (const cv::Point &neighborPt : computeNeighbors(currentPx)) {
-
+    for (const cv::Point& neighborPt : computeNeighbors(currentPx)) {
       bool ptIsInImage = imageBounds.contains(neighborPt);
-      bool ptIsAllowed =
-          allowedRegion.at<uint8_t>(neighborPt.y, neighborPt.x) == 255;
-      bool ptIsNotVisited =
-          distances.at<uint16_t>(neighborPt.y, neighborPt.x) ==
-          std::numeric_limits<uint16_t>::max();
+      bool ptIsAllowed = allowedRegion.at<uint8_t>(neighborPt.y, neighborPt.x) == 255;
+      bool ptIsNotVisited = distances.at<uint16_t>(neighborPt.y, neighborPt.x) ==
+                            std::numeric_limits<uint16_t>::max();
       bool ptIsNotInOccupiedSafe =
           occupiedSafe.at<uint8_t>(neighborPt.y, neighborPt.x) == 0;
 
@@ -233,9 +226,7 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
       //     neighborPt.x, neighborPt.y, ptIsInImage ? "True" : "False",
       //     ptIsAllowed ? "True" : "False", ptIsNotVisited ? "True" : "False");
 
-      if (ptIsInImage && ptIsAllowed && ptIsNotVisited &&
-          ptIsNotInOccupiedSafe) {
-
+      if (ptIsInImage && ptIsAllowed && ptIsNotVisited && ptIsNotInOccupiedSafe) {
         uint16_t currentDist = distances.at<uint16_t>(currentPx.y, currentPx.x);
         uint16_t neighborDist = currentDist + 1;
 
@@ -244,7 +235,7 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
         pixelQueue.push(neighborPt);
 
         // If it is a frontier node, increment the counter
-        for (const auto &pt : frontier)
+        for (const auto& pt : frontier)
           if (currentPx == pt)
             ++numFrontierPointsReached;
       }
@@ -262,8 +253,8 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
   return distances;
 }
 
-std::vector<cv::Point> computeShortestPathFromCostmap(const cv::Mat &costMap,
-                                                      const cv::Point &start) {
+std::vector<cv::Point> computeShortestPathFromCostmap(const cv::Mat& costMap,
+                                                      const cv::Point& start) {
   // CANNOT FIND DISTANCE TO A PARTICULAR TARGET POINT. ONLY THE SHORTEST PATH
   // TO THE CLOSEST PATH POINT
   // DOES NOT INCLUDE start IN THE RETURNED PATH
@@ -274,9 +265,8 @@ std::vector<cv::Point> computeShortestPathFromCostmap(const cv::Mat &costMap,
   uint16_t currentDist = costMap.at<uint16_t>(start.y, start.x);
 
   if (currentDist == std::numeric_limits<uint16_t>::max()) {
-    ROS_WARN(
-        "Start (%d, %d) point is has not been reached. Cannot compute path",
-        start.x, start.y);
+    ROS_WARN("Start (%d, %d) point is has not been reached. Cannot compute path",
+             start.x, start.y);
     return path;
   }
 
@@ -287,10 +277,8 @@ std::vector<cv::Point> computeShortestPathFromCostmap(const cv::Mat &costMap,
   cv::Point currentPt = start;
 
   while (currentDist != 0) {
-
     // Iterate over all neighbors. One with shortest distance is added to path
-    for (const cv::Point &neighborPt : computeNeighbors(currentPt)) {
-
+    for (const cv::Point& neighborPt : computeNeighbors(currentPt)) {
       // Cannot read distance if point is outside image
       if (!imageBounds.contains(neighborPt))
         continue;
@@ -310,9 +298,9 @@ std::vector<cv::Point> computeShortestPathFromCostmap(const cv::Mat &costMap,
   return path;
 }
 
-std::vector<cv::Point> computeLineOfSightPath(const cv::Mat &traversible,
-                                              const cv::Point &start,
-                                              const cv::Point &end) {
+std::vector<cv::Point> computeLineOfSightPath(const cv::Mat& traversible,
+                                              const cv::Point& start,
+                                              const cv::Point& end) {
   // Checks if the linear trajectory between start and end points traverse
   // outside of the boundary defined by the image, and returns the straight
   // line if it is within the bounds
@@ -331,10 +319,9 @@ std::vector<cv::Point> computeLineOfSightPath(const cv::Mat &traversible,
   return retval;
 }
 
-std::vector<cv::Point>
-findPathAlongSkeleton(const std::vector<cv::Point> &skeletonPts,
-                      const cv::Point &start, const cv::Point &end) {
-
+std::vector<cv::Point> findPathAlongSkeleton(const std::vector<cv::Point>& skeletonPts,
+                                             const cv::Point& start,
+                                             const cv::Point& end) {
   // Struct to hold point and a distance
   struct PtWithDistance {
     size_t idx;
@@ -345,14 +332,14 @@ findPathAlongSkeleton(const std::vector<cv::Point> &skeletonPts,
 
   // Comparator reversed for higher priority on small distances
   struct PtWithDistanceComparator {
-    bool operator()(const PtWithDistance &lhs, const PtWithDistance &rhs) {
+    bool operator()(const PtWithDistance& lhs, const PtWithDistance& rhs) {
       return lhs.dist > rhs.dist;
     }
   };
 
   // Comparator for cv::Point types
   struct cvPointComparator {
-    bool operator()(const cv::Point &lhs, const cv::Point &rhs) {
+    bool operator()(const cv::Point& lhs, const cv::Point& rhs) {
       if (lhs.x == rhs.x)
         return lhs.y < rhs.y;
       return lhs.x < rhs.x;
@@ -414,8 +401,7 @@ findPathAlongSkeleton(const std::vector<cv::Point> &skeletonPts,
 
     std::vector<cv::Point> neighborhood = computeNeighbors(curr.pt);
 
-    for (const cv::Point &neighbor : neighborhood) {
-
+    for (const cv::Point& neighbor : neighborhood) {
       // Skip if not in skeleton
       if (ptToIdx.find(neighbor) == ptToIdx.end())
         continue;
@@ -464,13 +450,12 @@ findPathAlongSkeleton(const std::vector<cv::Point> &skeletonPts,
   return path;
 }
 
-void octomapCallback(const octomap_msgs::Octomap &msg) {
-
+void octomapCallback(const octomap_msgs::Octomap& msg) {
   // Convert from message to OcTree
   const double kResolution = msg.resolution;
-  octomap::ColorOcTree *mapPtr = new octomap::ColorOcTree(kResolution);
-  octomap::AbstractOcTree *msgTree = octomap_msgs::binaryMsgToMap(msg);
-  mapPtr = dynamic_cast<octomap::ColorOcTree *>(msgTree);
+  octomap::ColorOcTree* mapPtr = new octomap::ColorOcTree(kResolution);
+  octomap::AbstractOcTree* msgTree = octomap_msgs::binaryMsgToMap(msg);
+  mapPtr = dynamic_cast<octomap::ColorOcTree*>(msgTree);
 
   // Extract (metric) bounds of the known space (occupied or free)
   double xMax, yMax, zMax, xMin, yMin, zMin;
@@ -490,23 +475,23 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   try {
     uavPose = tfBuffer.lookupTransform("map", "m100/base_link", ros::Time(0));
 
-  } catch (tf2::TransformException &ex) {
+  } catch (tf2::TransformException& ex) {
     ROS_WARN("%s", ex.what());
     ROS_WARN("Pose could not be computed. Exiting");
     return;
   }
 
   // Coordinates in the image frame
-  size_t xCoordDrone = static_cast<size_t>(std::round(
-             (uavPose.transform.translation.x - mapXMin) / kResolution)),
-         yCoordDrone = static_cast<size_t>(std::round(
-             (uavPose.transform.translation.y - mapYMin) / kResolution));
+  size_t xCoordDrone = static_cast<size_t>(
+             std::round((uavPose.transform.translation.x - mapXMin) / kResolution)),
+         yCoordDrone = static_cast<size_t>(
+             std::round((uavPose.transform.translation.y - mapYMin) / kResolution));
   const cv::Point coordDrone(xCoordDrone, yCoordDrone);
 
-  size_t xCoordTarget = static_cast<size_t>(
-             std::round((posTarget.x - mapXMin) / kResolution)),
-         yCoordTarget = static_cast<size_t>(
-             std::round((posTarget.y - mapYMin) / kResolution));
+  size_t xCoordTarget =
+             static_cast<size_t>(std::round((posTarget.x - mapXMin) / kResolution)),
+         yCoordTarget =
+             static_cast<size_t>(std::round((posTarget.y - mapYMin) / kResolution));
 
   const cv::Point coordTarget(xCoordTarget, yCoordTarget);
 
@@ -514,27 +499,25 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   // Drone diameter + 1 extra radius + safety margin
   const int droneSafetyDiameter =
       std::ceil((kDroneRadius * 3.0 + kSafetyMargin) / kResolution);
-  cv::Mat kernelSafety = cv::getStructuringElement(
-      cv::MorphShapes::MORPH_ELLIPSE,
-      cv::Size(droneSafetyDiameter, droneSafetyDiameter));
+  cv::Mat kernelSafety =
+      cv::getStructuringElement(cv::MorphShapes::MORPH_ELLIPSE,
+                                cv::Size(droneSafetyDiameter, droneSafetyDiameter));
 
   // ##### Project 3D-bounded map to a 2D binary occupancy
 
   // Set bounds of the map to be extracted
   octomap::point3d maxBoundsZRestricted(
       xMax + 1.0, yMax + 1.0,
-      std::min(uavPose.transform.translation.z + kMapSliceZThickness,
-               kMaxHeight)),
+      std::min(uavPose.transform.translation.z + kMapSliceZThickness, kMaxHeight)),
       minBoundsZRestricted(
           xMin - 1.0, yMin - 1.0,
-          std::max(uavPose.transform.translation.z - kMapSliceZThickness,
-                   kMinHeight));
+          std::max(uavPose.transform.translation.z - kMapSliceZThickness, kMinHeight));
 
   // Project the 3D bbx region into a 2D map (occupied / free)
-  const size_t width = static_cast<size_t>(
-                   std::ceil((mapXMax - mapXMin) / kResolution)),
-               height = static_cast<size_t>(
-                   std::ceil((mapYMax - mapYMin) / kResolution));
+  const size_t width =
+                   static_cast<size_t>(std::ceil((mapXMax - mapXMin) / kResolution)),
+               height =
+                   static_cast<size_t>(std::ceil((mapYMax - mapYMin) / kResolution));
 
   cv::Mat occupied(height, width, CV_8UC1, cv::Scalar(0)),
       free(height, width, CV_8UC1, cv::Scalar(0)),
@@ -546,14 +529,13 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // iterate over bounding-box-restricted points & update occupied / free
   for (octomap::ColorOcTree::leaf_bbx_iterator
-           it = mapPtr->begin_leafs_bbx(minBoundsZRestricted,
-                                        maxBoundsZRestricted),
+           it = mapPtr->begin_leafs_bbx(minBoundsZRestricted, maxBoundsZRestricted),
            end = mapPtr->end_leafs_bbx();
        it != end; ++it) {
-    size_t xCoord = static_cast<size_t>(
-               std::round((it.getX() - mapXMin) / kResolution)),
-           yCoord = static_cast<size_t>(
-               std::round((it.getY() - mapYMin) / kResolution));
+    size_t xCoord =
+               static_cast<size_t>(std::round((it.getX() - mapXMin) / kResolution)),
+           yCoord =
+               static_cast<size_t>(std::round((it.getY() - mapYMin) / kResolution));
 
     // If logOdd > 0 -> Occupied. Otherwise free
     // Checks for overlapping free / occupied is not essential
@@ -595,8 +577,8 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // Calculate distance map
   std::vector<cv::Point> targetPoints{coordTarget};
-  cv::Mat costMap = computeCostMap(frontier, traversible, occupiedSafe,
-                                   targetPoints, coordDrone);
+  cv::Mat costMap =
+      computeCostMap(frontier, traversible, occupiedSafe, targetPoints, coordDrone);
 
   // If costmap computation was successful, compute a path from frontier to the
   // target otherwise, use frontier point in the middle as a placeholder, and
@@ -605,14 +587,13 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
     ROS_ERROR("Cost map empty. Investigate");
   } else {
     // Compute path from the frontier point with the shortest distance
-    for (const cv::Point &pt : frontier) {
+    for (const cv::Point& pt : frontier) {
       if (costMap.at<uint16_t>(pt.y, pt.x) <
           costMap.at<uint16_t>(selectedFrontierPt.y, selectedFrontierPt.x)) {
         selectedFrontierPt = pt;
       }
     }
-    frontierToTarget =
-        computeShortestPathFromCostmap(costMap, selectedFrontierPt);
+    frontierToTarget = computeShortestPathFromCostmap(costMap, selectedFrontierPt);
   }
 
   // ##### Find path from drone to frontier #####
@@ -640,11 +621,10 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   // visibility
   float currentDistance = std::numeric_limits<float>::max();
 
-  for (const cv::Point &pt : skeletonPts) {
+  for (const cv::Point& pt : skeletonPts) {
     cv::Point diff = pt - selectedFrontierPt;
     float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
     if (dist < currentDistance) {
-
       // LoS needed only if the distance is smaller
       std::vector<cv::Point> lineOfSightPath =
           computeLineOfSightPath(traversible, pt, selectedFrontierPt);
@@ -665,11 +645,10 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   std::vector<cv::Point> uavToSkeleton;
 
-  for (const cv::Point &pt : skeletonPts) {
+  for (const cv::Point& pt : skeletonPts) {
     cv::Point diff = pt - coordDrone;
     float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
     if (dist < currentDistance) {
-
       // LoS needed only if the distance is smaller
       std::vector<cv::Point> lineOfSightPath =
           computeLineOfSightPath(traversible, coordDrone, pt);
@@ -686,8 +665,7 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   }
 
   // Find path along the skeleton between entryPoint and exitPoint
-  alongSkeleton =
-      findPathAlongSkeleton(skeletonPts, entrySkeletonPt, exitSkeletonPt);
+  alongSkeleton = findPathAlongSkeleton(skeletonPts, entrySkeletonPt, exitSkeletonPt);
 
   // Convert path points to real coordinates and an angle
   // Each node is facing the next node in line. Last node faces the frontier
@@ -697,14 +675,10 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   // From the line from UAV to skeleton. Excluding last point, which will be
   // calculated using first point of skeleton
   for (size_t i = 1; i < uavToSkeleton.size(); ++i) {
-    float xCurr = static_cast<float>(uavToSkeleton[i - 1].x) * kResolution +
-                  mapXMin,
-          yCurr = static_cast<float>(uavToSkeleton[i - 1].y) * kResolution +
-                  mapYMin,
-          xNext =
-              static_cast<float>(uavToSkeleton[i].x) * kResolution + mapXMin,
-          yNext =
-              static_cast<float>(uavToSkeleton[i].y) * kResolution + mapYMin;
+    float xCurr = static_cast<float>(uavToSkeleton[i - 1].x) * kResolution + mapXMin,
+          yCurr = static_cast<float>(uavToSkeleton[i - 1].y) * kResolution + mapYMin,
+          xNext = static_cast<float>(uavToSkeleton[i].x) * kResolution + mapXMin,
+          yNext = static_cast<float>(uavToSkeleton[i].y) * kResolution + mapYMin;
 
     pathX.push_back(xCurr);
     pathY.push_back(yCurr);
@@ -713,28 +687,20 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // From uavToSkeleton to alongSkeleton
   {
-    const cv::Point &uavToSkeletonLast =
-        uavToSkeleton[uavToSkeleton.size() - 1];
-    pathX.push_back(static_cast<float>(uavToSkeletonLast.x) * kResolution +
-                    mapXMin);
-    pathY.push_back(static_cast<float>(uavToSkeletonLast.y) * kResolution +
-                    mapYMin);
-    pathYaw.push_back(
-        std::atan2(uavToSkeletonLast.y - skeletonToFrontier[0].y,
-                   uavToSkeletonLast.x - skeletonToFrontier[0].x));
+    const cv::Point& uavToSkeletonLast = uavToSkeleton[uavToSkeleton.size() - 1];
+    pathX.push_back(static_cast<float>(uavToSkeletonLast.x) * kResolution + mapXMin);
+    pathY.push_back(static_cast<float>(uavToSkeletonLast.y) * kResolution + mapYMin);
+    pathYaw.push_back(std::atan2(uavToSkeletonLast.y - skeletonToFrontier[0].y,
+                                 uavToSkeletonLast.x - skeletonToFrontier[0].x));
   }
 
   // PathYaw for skeleton. Excluding last point, which will be calculated using
   // first point of skeletonToFrontier
   for (size_t i = 1; i < alongSkeleton.size(); ++i) {
-    float xCurr = static_cast<float>(alongSkeleton[i - 1].x) * kResolution +
-                  mapXMin,
-          yCurr = static_cast<float>(alongSkeleton[i - 1].y) * kResolution +
-                  mapYMin,
-          xNext =
-              static_cast<float>(alongSkeleton[i].x) * kResolution + mapXMin,
-          yNext =
-              static_cast<float>(alongSkeleton[i].y) * kResolution + mapYMin;
+    float xCurr = static_cast<float>(alongSkeleton[i - 1].x) * kResolution + mapXMin,
+          yCurr = static_cast<float>(alongSkeleton[i - 1].y) * kResolution + mapYMin,
+          xNext = static_cast<float>(alongSkeleton[i].x) * kResolution + mapXMin,
+          yNext = static_cast<float>(alongSkeleton[i].y) * kResolution + mapYMin;
 
     pathX.push_back(xCurr);
     pathY.push_back(yCurr);
@@ -743,7 +709,7 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // From skeleton to frontier
   {
-    const cv::Point &skeletonLast = alongSkeleton[alongSkeleton.size() - 1];
+    const cv::Point& skeletonLast = alongSkeleton[alongSkeleton.size() - 1];
     pathX.push_back(static_cast<float>(skeletonLast.x) * kResolution + mapXMin);
     pathY.push_back(static_cast<float>(skeletonLast.y) * kResolution + mapYMin);
     pathYaw.push_back(std::atan2(skeletonLast.y - skeletonToFrontier[0].y,
@@ -754,15 +720,11 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   // will be calculated using the frontier point
   for (size_t i = 1; i < skeletonToFrontier.size(); ++i) {
     float xCurr =
-              static_cast<float>(skeletonToFrontier[i - 1].x) * kResolution +
-              mapXMin,
+              static_cast<float>(skeletonToFrontier[i - 1].x) * kResolution + mapXMin,
           yCurr =
-              static_cast<float>(skeletonToFrontier[i - 1].y) * kResolution +
-              mapYMin,
-          xNext = static_cast<float>(skeletonToFrontier[i].x) * kResolution +
-                  mapXMin,
-          yNext = static_cast<float>(skeletonToFrontier[i].y) * kResolution +
-                  mapYMin;
+              static_cast<float>(skeletonToFrontier[i - 1].y) * kResolution + mapYMin,
+          xNext = static_cast<float>(skeletonToFrontier[i].x) * kResolution + mapXMin,
+          yNext = static_cast<float>(skeletonToFrontier[i].y) * kResolution + mapYMin;
 
     pathX.push_back(xCurr);
     pathY.push_back(yCurr);
@@ -771,15 +733,14 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // From skeletonToFrontier to selectedFrontierPt
   {
-    const cv::Point &skeletonToFrontierLast =
+    const cv::Point& skeletonToFrontierLast =
         skeletonToFrontier[skeletonToFrontier.size() - 1];
     pathX.push_back(static_cast<float>(skeletonToFrontierLast.x) * kResolution +
                     mapXMin);
     pathY.push_back(static_cast<float>(skeletonToFrontierLast.y) * kResolution +
                     mapYMin);
-    pathYaw.push_back(
-        std::atan2(skeletonToFrontierLast.y - selectedFrontierPt.y,
-                   skeletonToFrontierLast.x - selectedFrontierPt.x));
+    pathYaw.push_back(std::atan2(skeletonToFrontierLast.y - selectedFrontierPt.y,
+                                 skeletonToFrontierLast.x - selectedFrontierPt.x));
   }
 
   if (pathX.size() != pathY.size() or pathY.size() != pathYaw.size()) {
@@ -793,10 +754,9 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // Filter x, y, and yaw separately with a FIR (order 10, cutoff 0.01)
   const std::vector<float> kernel{
-      0.014548974194706, 0.030571249925298, 0.072545157760889,
-      0.124486576686153, 0.166541934360414, 0.182612214145080,
-      0.166541934360414, 0.124486576686153, 0.072545157760889,
-      0.030571249925298, 0.014548974194706,
+      0.014548974194706, 0.030571249925298, 0.072545157760889, 0.124486576686153,
+      0.166541934360414, 0.182612214145080, 0.166541934360414, 0.124486576686153,
+      0.072545157760889, 0.030571249925298, 0.014548974194706,
   };
 
   // Repeat front elements / last message N_rep times to retain initial /  final
@@ -821,7 +781,6 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
 #pragma omp parallel for schedule(dynamic)
   for (size_t i = 0; i < N_filt; ++i) {
-
     // Filter sin & cos to avoid discontinuities
     float x_filt = 0., y_filt = 0., sin_filt = 0., cos_filt = 0.;
 
@@ -845,7 +804,11 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   }
 
   // Publish message
+  static uint32_t seq = 0;
   geometry_msgs::PoseArray uavToFrontier;
+  uavToFrontier.header.seq = seq;
+  uavToFrontier.header.stamp = ros::Time::now();
+  uavToFrontier.header.frame_id = "map";
   uavToFrontier.poses = pathPoses;
   pathPub.publish(uavToFrontier);
 
@@ -856,8 +819,7 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // Replace uint16_t max with 0
   cv::threshold(costMapVis, costMapInvalidMask,
-                std::numeric_limits<uint16_t>::max() - 2, 1,
-                cv::THRESH_BINARY_INV);
+                std::numeric_limits<uint16_t>::max() - 2, 1, cv::THRESH_BINARY_INV);
   costMapVis = costMapVis.mul(costMapInvalidMask);
 
   // Put images in range of 0 - 255 in 8 bits
@@ -866,8 +828,7 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
 
   // Remove overlapping costmap from traversible area
   cv::Mat traversibleInverseMask;
-  cv::threshold(traversible, traversibleInverseMask, 100, 1,
-                cv::THRESH_BINARY_INV);
+  cv::threshold(traversible, traversibleInverseMask, 100, 1, cv::THRESH_BINARY_INV);
   costMapVis = costMapVis.mul(traversibleInverseMask);
 
   // Base image
@@ -882,7 +843,7 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   cv::merge(channels, visual);
 
   // Skeleton (gray)
-  for (const auto &pt : skeletonPts) {
+  for (const auto& pt : skeletonPts) {
     cv::circle(visual, pt, 0, cv::Scalar(100, 100, 100), 1);
   }
 
@@ -892,30 +853,30 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
              cv::Scalar(255, 0, 255), 1);
 
   // Mark frontier points (white)
-  for (const auto &pt : frontier)
+  for (const auto& pt : frontier)
     cv::circle(visual, pt, 0, cv::Scalar(255, 255, 255), 1);
 
   // ### Paths ###
 
   // UAV -> Skeleton (blue-ish)
-  for (const auto &pt : uavToSkeleton)
+  for (const auto& pt : uavToSkeleton)
     cv::circle(visual, pt, 0, cv::Scalar(255, 155, 0), 1);
 
   // Along skeleton (light gray)
-  for (const auto &pt : alongSkeleton)
+  for (const auto& pt : alongSkeleton)
     cv::circle(visual, pt, 0, cv::Scalar(200, 200, 200), 1);
 
   // Skeleton -> frontier (orange)
-  for (const auto &pt : skeletonToFrontier)
+  for (const auto& pt : skeletonToFrontier)
     cv::circle(visual, pt, 0, cv::Scalar(0, 155, 255), 1);
 
   // Frontier -> target (yellow)
-  for (const auto &pt : frontierToTarget)
+  for (const auto& pt : frontierToTarget)
     cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
 
   // Add target location on map (purple)
-  cv::circle(visual, cv::Point(xCoordTarget, yCoordTarget), 0,
-             cv::Scalar(100, 0, 100), -1);
+  cv::circle(visual, cv::Point(xCoordTarget, yCoordTarget), 0, cv::Scalar(100, 0, 100),
+             -1);
 
   // Correct orientation
   cv::flip(visual, visual, 0);
@@ -930,7 +891,7 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   return;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   const std::string nodeName = "pathfinding_node";
   ros::init(argc, argv, nodeName);
   ros::NodeHandle nh;
