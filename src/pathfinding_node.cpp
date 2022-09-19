@@ -12,10 +12,12 @@
 #include <cstdint>
 #include <mutex>
 #include <opencv2/opencv.hpp>
+#include <opencv2/ximgproc.hpp>
 
 #include "octomap/AbstractOcTree.h"
 #include "octomap/OcTree.h"
 #include "octomap/OcTreeKey.h"
+#include "opencv2/core.hpp"
 #include "opencv2/core/cvdef.h"
 #include "opencv2/core/hal/interface.h"
 #include "opencv2/imgproc.hpp"
@@ -47,11 +49,24 @@ const cv::Point2d posTarget(5.0, -5.0);
 const double kDroneRadius = 0.2, kSafetyMargin = 0.2;
 
 // Neighborhood order in x and y: From top, clockwise
-const int neighborX[8] = {0, 1, 1, 1, 0, -1, -1, -1},
-          neighborY[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
 
 // ##### Publishers #####
 image_transport::Publisher vis_pub;
+
+// Compute 8-neighbors of a given point
+std::vector<cv::Point> computeNeighbors(const cv::Point &pt) {
+
+  const int neighborX[8] = {0, 1, 1, 1, 0, -1, -1, -1},
+            neighborY[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
+
+  std::vector<cv::Point> neighborhood;
+
+  for (size_t i = 0; i < 8; ++i) {
+    cv::Point neighborPt(pt.x + neighborX[i], pt.y + neighborY[i]);
+    neighborhood.push_back(neighborPt);
+  }
+  return neighborhood;
+}
 
 // Extract the contour of traversible region that the drone is in
 std::vector<cv::Point>
@@ -195,9 +210,7 @@ cv::Mat computeCostMap(const std::vector<cv::Point> &frontier,
     // -> within convex hull
     // -> haven't been visited
     // -> not in occupiedSafe
-    for (size_t i = 0; i < 8; ++i) {
-      cv::Point neighborPt(currentPx.x + neighborX[i],
-                           currentPx.y + neighborY[i]);
+    for (const cv::Point &neighborPt : computeNeighbors(currentPx)) {
 
       bool ptIsInImage = imageBounds.contains(neighborPt);
       bool ptIsAllowed =
@@ -264,40 +277,72 @@ std::vector<cv::Point> computeShortestPathFromCostmap(const cv::Mat &costMap,
   cv::Rect imageBounds(cv::Point(), costMap.size());
 
   // Initialize
-  cv::Point currentPt = start, minDistPt = start;
+  cv::Point currentPt = start;
 
   while (currentDist != 0) {
 
     // Iterate over all neighbors. One with shortest distance is added to path
-    for (size_t i = 0; i < 8; ++i) {
-      cv::Point neighbor(currentPt.x + neighborX[i],
-                         currentPt.y + neighborY[i]);
-      if (!imageBounds.contains(neighbor))
+    for (const cv::Point &neighborPt : computeNeighbors(currentPt)) {
+
+      // Cannot read distance if point is outside image
+      if (!imageBounds.contains(neighborPt))
         continue;
 
-      uint16_t neighborDist = costMap.at<uint16_t>(neighbor.y, neighbor.x);
+      uint16_t neighborDist = costMap.at<uint16_t>(neighborPt.y, neighborPt.x);
 
       if (neighborDist < currentDist) {
         currentDist = neighborDist;
-        minDistPt = neighbor;
+        currentPt = neighborPt;
       }
     }
 
     // Add minimum distance point to the path
-    path.push_back(minDistPt);
-
-    // DEBUG: currentPt should not be equal to minDistPt. Distances are
-    // monotonic
-    if (currentPt == minDistPt) {
-      ROS_ERROR("Path computation error. Investigate");
-      return std::vector<cv::Point>();
-    }
-
-    // Update currentPt with minDistPt
-    currentPt = minDistPt;
+    path.push_back(currentPt);
   }
 
   return path;
+}
+
+bool isSkeletonEndPoint(const cv::Mat &skeleton, const cv::Point &pt) {
+  // Check the number of times the neighboring points change color
+  // Seems that 2 jumps is a good indicator for an end point
+  // Has not been robustly tested
+
+  // Construct 8-neighborhood in a closed line
+  std::vector<cv::Point> nbhood = computeNeighbors(pt);
+  nbhood.push_back(nbhood[0]);
+
+  size_t jump_count = 0;
+  for (size_t i = 0; i < 8; ++i) {
+    if (skeleton.at<uint8_t>(nbhood[i]) != skeleton.at<uint8_t>(nbhood[i + 1]))
+      ++jump_count;
+  }
+
+  if (jump_count == 2) // End point
+    return true;
+
+  return false;
+}
+
+std::vector<cv::Point> computeLineOfSightPath(const cv::Mat &traversible,
+                                              const cv::Point &start,
+                                              const cv::Point &end) {
+  // Checks if the linear trajectory between start and end points traverse
+  // outside of the boundary defined by the image, and returns the straight
+  // line if it is within the bounds
+  std::vector<cv::Point> retval;
+  cv::LineIterator it(traversible, start, end, 8);
+
+  // Starting from 1 to exclude the starting point
+  ++it;
+  for (int i = 1; i < it.count; i++, ++it) {
+    if (traversible.at<uint8_t>(it.pos()) != 255) {
+      return std::vector<cv::Point>();
+    } else {
+      retval.push_back(it.pos());
+    }
+  }
+  return retval;
 }
 
 void octomapCallback(const octomap_msgs::Octomap &msg) {
@@ -354,6 +399,8 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   cv::Mat kernelSafety = cv::getStructuringElement(
       cv::MorphShapes::MORPH_ELLIPSE,
       cv::Size(droneSafetyDiameter, droneSafetyDiameter));
+
+  // ##### Project 3D-bounded map to a 2D binary occupancy
 
   // Set bounds of the map to be extracted
   octomap::point3d maxBoundsZRestricted(
@@ -414,6 +461,8 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   // center
   cv::Mat traversible = free.mul(occupiedSafeMask);
 
+  // ##### Find path from frontier to target #####
+
   // Extract frontier points
   std::vector<cv::Point> frontier =
       findFrontierPoints(traversible, occupiedSafe, coordDrone);
@@ -440,8 +489,52 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
       selectedFrontierPt = pt;
     }
   }
-  std::vector<cv::Point> shortestPathFromFrontier =
+  std::vector<cv::Point> frontierToTarget =
       computeShortestPathFromCostmap(costMap, selectedFrontierPt);
+
+  // ##### Find path from drone to frontier #####
+
+  // Extract skeleton
+  cv::Mat skeleton;
+  cv::ximgproc::thinning(traversible, skeleton);
+
+  // Mat to vector for skeleton points
+  std::vector<cv::Point> skeletonPts;
+  cv::findNonZero(skeleton, skeletonPts);
+
+  if (skeletonPts.empty()) {
+    ROS_WARN("Skeleton could not be computed");
+    return;
+  }
+
+  // Find skeleton point closest to the selected frontier point with LoS
+  // visibility
+  cv::Point selectedSkeletonPt = skeletonPts[0];
+  float currentDistance = std::numeric_limits<float>::max();
+
+  std::vector<cv::Point> skeletonToFrontier;
+
+  for (const cv::Point &pt : skeletonPts) {
+    cv::Point diff = pt - selectedFrontierPt;
+    float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+    if (dist < currentDistance) {
+
+      // LoS needed only if the distance is smaller
+      std::vector<cv::Point> lineOfSightPath =
+          computeLineOfSightPath(traversible, pt, selectedFrontierPt);
+
+      // If LoS path is empty, then there is no path
+      if (lineOfSightPath.empty()) {
+        continue;
+      } else {
+        currentDistance = dist;
+        selectedSkeletonPt = pt;
+        skeletonToFrontier = lineOfSightPath;
+      }
+    }
+  }
+
+  // Compute the path along the skeleton reaching to the
 
   // ##### Visualization #####
 
@@ -479,22 +572,33 @@ void octomapCallback(const octomap_msgs::Octomap &msg) {
   std::vector<cv::Mat> channels{costMapVis, traversible, occupied};
   cv::merge(channels, visual);
 
+  // Skeleton (gray)
+  for (const auto &pt : skeletonPts) {
+    cv::circle(visual, pt, 0, cv::Scalar(100, 100, 100), 1);
+  }
+
   // Add drone location on map (magenta circle)
   size_t radius = static_cast<size_t>(kDroneRadius / kResolution);
   cv::circle(visual, cv::Point(xCoordDrone, yCoordDrone), radius,
              cv::Scalar(255, 0, 255), 1);
 
-  // Add target location on map (purple)
-  cv::circle(visual, cv::Point(xCoordTarget, yCoordTarget), 0,
-             cv::Scalar(155, 0, 155), -1);
-
-  // Mark frontier points - White
+  // Mark frontier points (white)
   for (const auto &pt : frontier)
     cv::circle(visual, pt, 0, cv::Scalar(255, 255, 255), 1);
 
-  // Mark shortest path to target from frontier - Yellow
-  for (const auto &pt : shortestPathFromFrontier)
+  // ### Paths ###
+
+  // Skeleton -> frontier (orange)
+  for (const auto &pt : skeletonToFrontier)
+    cv::circle(visual, pt, 0, cv::Scalar(0, 155, 255), 1);
+
+  // Frontier -> target (yellow)
+  for (const auto &pt : frontierToTarget)
     cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
+
+  // Add target location on map (purple)
+  cv::circle(visual, cv::Point(xCoordTarget, yCoordTarget), 0,
+             cv::Scalar(100, 0, 100), -1);
 
   // Correct orientation
   cv::flip(visual, visual, 0);
