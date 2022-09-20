@@ -814,73 +814,79 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   // From the line from UAV to skeleton. Excluding last point, which will be
   // calculated using first point of skeleton
-  for (size_t i = 1; i < uavToSkeleton.size(); ++i) {
-    float xCurr = static_cast<float>(uavToSkeleton[i - 1].x) * kResolution + mapXMin,
-          yCurr = static_cast<float>(uavToSkeleton[i - 1].y) * kResolution + mapYMin,
-          xNext = static_cast<float>(uavToSkeleton[i].x) * kResolution + mapXMin,
-          yNext = static_cast<float>(uavToSkeleton[i].y) * kResolution + mapYMin;
+  if (uavToSkeleton.size() > 1) {
+    for (size_t i = 1; i < uavToSkeleton.size(); ++i) {
+      float xCurr = static_cast<float>(uavToSkeleton[i - 1].x) * kResolution + mapXMin,
+            yCurr = static_cast<float>(uavToSkeleton[i - 1].y) * kResolution + mapYMin,
+            xNext = static_cast<float>(uavToSkeleton[i].x) * kResolution + mapXMin,
+            yNext = static_cast<float>(uavToSkeleton[i].y) * kResolution + mapYMin;
 
-    pathX.push_back(xCurr);
-    pathY.push_back(yCurr);
-    pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
-  }
+      pathX.push_back(xCurr);
+      pathY.push_back(yCurr);
+      pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
+    }
 
-  // From uavToSkeleton to alongSkeleton
-  {
-    const cv::Point& uavToSkeletonLast = uavToSkeleton[uavToSkeleton.size() - 1];
-    pathX.push_back(static_cast<float>(uavToSkeletonLast.x) * kResolution + mapXMin);
-    pathY.push_back(static_cast<float>(uavToSkeletonLast.y) * kResolution + mapYMin);
-    pathYaw.push_back(std::atan2(uavToSkeletonLast.y - skeletonToFrontier[0].y,
-                                 uavToSkeletonLast.x - skeletonToFrontier[0].x));
+    // From uavToSkeleton to alongSkeleton
+    {
+      const cv::Point& uavToSkeletonLast = uavToSkeleton[uavToSkeleton.size() - 1];
+      pathX.push_back(static_cast<float>(uavToSkeletonLast.x) * kResolution + mapXMin);
+      pathY.push_back(static_cast<float>(uavToSkeletonLast.y) * kResolution + mapYMin);
+      pathYaw.push_back(std::atan2(uavToSkeletonLast.y - skeletonToFrontier[0].y,
+                                   uavToSkeletonLast.x - skeletonToFrontier[0].x));
+    }
   }
 
   // PathYaw for skeleton. Excluding last point, which will be calculated using
   // first point of skeletonToFrontier
-  for (size_t i = 1; i < alongSkeleton.size(); ++i) {
-    float xCurr = static_cast<float>(alongSkeleton[i - 1].x) * kResolution + mapXMin,
-          yCurr = static_cast<float>(alongSkeleton[i - 1].y) * kResolution + mapYMin,
-          xNext = static_cast<float>(alongSkeleton[i].x) * kResolution + mapXMin,
-          yNext = static_cast<float>(alongSkeleton[i].y) * kResolution + mapYMin;
+  if (alongSkeleton.size() > 1) {
+    for (size_t i = 1; i < alongSkeleton.size(); ++i) {
+      float xCurr = static_cast<float>(alongSkeleton[i - 1].x) * kResolution + mapXMin,
+            yCurr = static_cast<float>(alongSkeleton[i - 1].y) * kResolution + mapYMin,
+            xNext = static_cast<float>(alongSkeleton[i].x) * kResolution + mapXMin,
+            yNext = static_cast<float>(alongSkeleton[i].y) * kResolution + mapYMin;
 
-    pathX.push_back(xCurr);
-    pathY.push_back(yCurr);
-    pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
-  }
+      pathX.push_back(xCurr);
+      pathY.push_back(yCurr);
+      pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
+    }
 
-  // From skeleton to frontier
-  {
-    const cv::Point& skeletonLast = alongSkeleton[alongSkeleton.size() - 1];
-    pathX.push_back(static_cast<float>(skeletonLast.x) * kResolution + mapXMin);
-    pathY.push_back(static_cast<float>(skeletonLast.y) * kResolution + mapYMin);
-    pathYaw.push_back(std::atan2(skeletonLast.y - skeletonToFrontier[0].y,
-                                 skeletonLast.x - skeletonToFrontier[0].x));
+    // From skeleton to frontier
+    {
+      const cv::Point& skeletonLast = alongSkeleton[alongSkeleton.size() - 1];
+      pathX.push_back(static_cast<float>(skeletonLast.x) * kResolution + mapXMin);
+      pathY.push_back(static_cast<float>(skeletonLast.y) * kResolution + mapYMin);
+      pathYaw.push_back(std::atan2(skeletonLast.y - skeletonToFrontier[0].y,
+                                   skeletonLast.x - skeletonToFrontier[0].x));
+    }
   }
 
   // PathYaw for the line from skeleton to frontier. Excluding last point, which
   // will be calculated using the frontier point
-  for (size_t i = 1; i < skeletonToFrontier.size(); ++i) {
-    float xCurr =
-              static_cast<float>(skeletonToFrontier[i - 1].x) * kResolution + mapXMin,
-          yCurr =
-              static_cast<float>(skeletonToFrontier[i - 1].y) * kResolution + mapYMin,
-          xNext = static_cast<float>(skeletonToFrontier[i].x) * kResolution + mapXMin,
-          yNext = static_cast<float>(skeletonToFrontier[i].y) * kResolution + mapYMin;
+  if (skeletonToFrontier.size() > 1) {
+    for (size_t i = 1; i < skeletonToFrontier.size(); ++i) {
+      float xCurr =
+                static_cast<float>(skeletonToFrontier[i - 1].x) * kResolution + mapXMin,
+            yCurr =
+                static_cast<float>(skeletonToFrontier[i - 1].y) * kResolution + mapYMin,
+            xNext = static_cast<float>(skeletonToFrontier[i].x) * kResolution + mapXMin,
+            yNext = static_cast<float>(skeletonToFrontier[i].y) * kResolution + mapYMin;
 
-    pathX.push_back(xCurr);
-    pathY.push_back(yCurr);
-    pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
-  }
+      pathX.push_back(xCurr);
+      pathY.push_back(yCurr);
+      pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
+    }
 
-  // From skeletonToFrontier to selectedFrontierPt
-  {
-    const cv::Point& skeletonToFrontierLast =
-        skeletonToFrontier[skeletonToFrontier.size() - 1];
-    pathX.push_back(static_cast<float>(skeletonToFrontierLast.x) * kResolution +
-                    mapXMin);
-    pathY.push_back(static_cast<float>(skeletonToFrontierLast.y) * kResolution +
-                    mapYMin);
-    pathYaw.push_back(std::atan2(skeletonToFrontierLast.y - selectedFrontierPt.y,
-                                 skeletonToFrontierLast.x - selectedFrontierPt.x));
+    // From skeletonToFrontier to selectedFrontierPt
+    {
+      const cv::Point& skeletonToFrontierLast =
+          skeletonToFrontier[skeletonToFrontier.size() - 1];
+      pathX.push_back(static_cast<float>(skeletonToFrontierLast.x) * kResolution +
+                      mapXMin);
+      pathY.push_back(static_cast<float>(skeletonToFrontierLast.y) * kResolution +
+                      mapYMin);
+      pathYaw.push_back(std::atan2(skeletonToFrontierLast.y - selectedFrontierPt.y,
+                                   skeletonToFrontierLast.x - selectedFrontierPt.x));
+    }
   }
 
   if (pathX.size() != pathY.size() or pathY.size() != pathYaw.size()) {
