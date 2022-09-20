@@ -24,6 +24,7 @@
 #include "opencv2/core.hpp"
 #include "opencv2/core/cvdef.h"
 #include "opencv2/core/hal/interface.h"
+#include "opencv2/core/types.hpp"
 #include "opencv2/imgproc.hpp"
 #include "ros/duration.h"
 #include "ros/node_handle.h"
@@ -31,6 +32,7 @@
 #include "std_msgs/String.h"
 #include "tf2/exceptions.h"
 #include "tf2_ros/buffer.h"
+#include "timer.hpp"
 #include "visualization_msgs/MarkerArray.h"
 
 tf2_ros::Buffer tfBuffer;
@@ -49,10 +51,13 @@ const cv::Point2d posTarget(5.0, -5.0);
 
 // Drone radius and safety margin (in meters). Occupied cells will be expanded
 // by kDroneRadius * 2 + kSafetymargin to avoid collisions
-const double kDroneRadius = 0.2, kSafetyMargin = 0.2;
+const double kDroneRadius = 0.2, kSafetyMargin = 0.1;
 
 // Navigation height (z axis value)
 const double kNavigationHeight = 1.0;
+
+// Timing information debugging
+const bool debug = true;
 
 // ##### Publishers #####
 image_transport::Publisher debugVis;  // Debug visualization
@@ -450,12 +455,101 @@ std::vector<cv::Point> findPathAlongSkeleton(const std::vector<cv::Point>& skele
   return path;
 }
 
+void visualize(const cv::Mat& costMap,
+               const cv::Mat& traversible,
+               const cv::Mat& occupied,
+               const std::vector<cv::Point>& skeletonPts,
+               const cv::Point& coordDrone,
+               const std::vector<cv::Point>& frontier,
+               const std::vector<cv::Point>& uavToSkeleton,
+               const std::vector<cv::Point>& alongSkeleton,
+               const std::vector<cv::Point>& skeletonToFrontier,
+               const std::vector<cv::Point>& frontierToTarget,
+               const cv::Point& coordTarget,
+               const float& kResolution) {
+  // ##### Visualization #####
+
+  // Cost map
+  cv::Mat costMapVis = costMap.clone(), costMapInvalidMask;
+
+  // Replace uint16_t max with 0
+  cv::threshold(costMapVis, costMapInvalidMask,
+                std::numeric_limits<uint16_t>::max() - 2, 1, cv::THRESH_BINARY_INV);
+  costMapVis = costMapVis.mul(costMapInvalidMask);
+
+  // Put images in range of 0 - 255 in 8 bits
+  cv::normalize(costMapVis, costMapVis, 0, 255, cv::NORM_MINMAX);
+  costMapVis.convertTo(costMapVis, CV_8UC1);
+
+  // Remove overlapping costmap from traversible area
+  cv::Mat traversibleInverseMask;
+  cv::threshold(traversible, traversibleInverseMask, 100, 1, cv::THRESH_BINARY_INV);
+  costMapVis = costMapVis.mul(traversibleInverseMask);
+
+  // Base image
+  // Traversible region -> Green
+  // Frontier cost map -> Blue
+  // Occupied region -> Red (exact borders)
+  // Black space is either occupied safe (around occupied regions), or not
+  // discovered
+  cv::Mat visual;
+  // std::vector<cv::Mat> channels{traversible, free, occupied};
+  std::vector<cv::Mat> channels{costMapVis, traversible, occupied};
+  cv::merge(channels, visual);
+
+  // Skeleton (gray)
+  for (const auto& pt : skeletonPts) {
+    cv::circle(visual, pt, 0, cv::Scalar(100, 100, 100), 1);
+  }
+
+  // Add drone location on map (magenta circle)
+  size_t radius = static_cast<size_t>(kDroneRadius / kResolution);
+  cv::circle(visual, coordDrone, radius, cv::Scalar(255, 0, 255), 1);
+
+  // Mark frontier points (white)
+  for (const auto& pt : frontier)
+    cv::circle(visual, pt, 0, cv::Scalar(255, 255, 255), 1);
+
+  // ### Paths ###
+
+  // UAV -> Skeleton (blue-ish)
+  for (const auto& pt : uavToSkeleton)
+    cv::circle(visual, pt, 0, cv::Scalar(255, 155, 0), 1);
+
+  // Along skeleton (light gray)
+  for (const auto& pt : alongSkeleton)
+    cv::circle(visual, pt, 0, cv::Scalar(200, 200, 200), 1);
+
+  // Skeleton -> frontier (orange)
+  for (const auto& pt : skeletonToFrontier)
+    cv::circle(visual, pt, 0, cv::Scalar(0, 155, 255), 1);
+
+  // Frontier -> target (yellow)
+  for (const auto& pt : frontierToTarget)
+    cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
+
+  // Add target location on map (purple)
+  cv::circle(visual, coordTarget, 0, cv::Scalar(100, 0, 100), -1);
+
+  // Correct orientation
+  cv::flip(visual, visual, 0);
+
+  sensor_msgs::ImagePtr visMsg =
+      cv_bridge::CvImage(std_msgs::Header(), "bgr8", visual).toImageMsg();
+  debugVis.publish(visMsg);
+}
+
 void octomapCallback(const octomap_msgs::Octomap& msg) {
+  Timer timer;
+  timer.Tic();
+
   // Convert from message to OcTree
   const double kResolution = msg.resolution;
   octomap::ColorOcTree* mapPtr = new octomap::ColorOcTree(kResolution);
   octomap::AbstractOcTree* msgTree = octomap_msgs::binaryMsgToMap(msg);
   mapPtr = dynamic_cast<octomap::ColorOcTree*>(msgTree);
+
+  ROS_INFO_COND(debug, "[TIMING] Message to OcTree: %.4f", timer.Toc());
 
   // Extract (metric) bounds of the known space (occupied or free)
   double xMax, yMax, zMax, xMin, yMin, zMin;
@@ -469,6 +563,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
                mapXMax = std::max(xMax, posTarget.x) + kResolution * 5,
                mapYMax = std::max(yMax, posTarget.y) + kResolution * 5;
 
+  ROS_INFO_COND(debug, "[TIMING] Map bound extraction: %.4f", timer.Toc());
+
   // Obtain UAV location wrt to the map frame. Exit if cannot be retrieved
   geometry_msgs::TransformStamped uavPose;
 
@@ -480,6 +576,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     ROS_WARN("Pose could not be computed. Exiting");
     return;
   }
+
+  ROS_INFO_COND(debug, "[TIMING] UAV pose extraction: %.4f", timer.Toc());
 
   // Coordinates in the image frame
   size_t xCoordDrone = static_cast<size_t>(
@@ -495,13 +593,18 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   const cv::Point coordTarget(xCoordTarget, yCoordTarget);
 
+  ROS_INFO_COND(debug, "[TIMING] UAV / Target coordinate to image computation: %.4f",
+                timer.Toc());
+
   // Safety radius in image frame
-  // Drone diameter + 1 extra radius + safety margin
+  // Drone diameter + 0 extra radius + safety margin
   const int droneSafetyDiameter =
-      std::ceil((kDroneRadius * 3.0 + kSafetyMargin) / kResolution);
+      std::ceil((kDroneRadius * 2.0 + kSafetyMargin) / kResolution);
   cv::Mat kernelSafety =
       cv::getStructuringElement(cv::MorphShapes::MORPH_ELLIPSE,
                                 cv::Size(droneSafetyDiameter, droneSafetyDiameter));
+
+  ROS_INFO_COND(debug, "[TIMING] Safety radius assignment: %.4f", timer.Toc());
 
   // ##### Project 3D-bounded map to a 2D binary occupancy
 
@@ -548,6 +651,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     }
   }
 
+  ROS_INFO_COND(debug, "[TIMING] Projecting map to 2D: %.4f", timer.Toc());
+
   // Perform morphological closing on free map to eliminate small holes
   cv::Mat kernel3x3 =
       cv::getStructuringElement(cv::MorphShapes::MORPH_RECT, cv::Size(3, 3));
@@ -563,6 +668,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   // center
   cv::Mat traversible = free.mul(occupiedSafeMask);
 
+  ROS_INFO_COND(debug, "[TIMING] 2D map processing: %.4f", timer.Toc());
+
   // ##### Find path from frontier to target #####
   std::vector<cv::Point> frontierToTarget;
 
@@ -570,8 +677,21 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   std::vector<cv::Point> frontier =
       findFrontierPoints(traversible, occupiedSafe, coordDrone);
 
-  if (frontier.empty())
+  ROS_INFO_COND(debug, "[TIMING] Frontier computation: %.4f", timer.Toc());
+
+  // Without a frontier, cannot do anything
+  if (frontier.empty()) {
+    ROS_WARN("Frontier cannot be computed. Exiting");
+
+    cv::Mat costMap(traversible.size(), CV_8UC1, cv::Scalar(0));
+    std::vector<cv::Point> skeletonPts, uavToSkeleton, alongSkeleton,
+        skeletonToFrontier;
+
+    visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
+              uavToSkeleton, alongSkeleton, skeletonToFrontier, frontierToTarget,
+              coordTarget, kResolution);
     return;
+  }
 
   cv::Point selectedFrontierPt = frontier[frontier.size() / 2];
 
@@ -579,6 +699,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   std::vector<cv::Point> targetPoints{coordTarget};
   cv::Mat costMap =
       computeCostMap(frontier, traversible, occupiedSafe, targetPoints, coordDrone);
+
+  ROS_INFO_COND(debug, "[TIMING] Cost map computation: %.4f", timer.Toc());
 
   // If costmap computation was successful, compute a path from frontier to the
   // target otherwise, use frontier point in the middle as a placeholder, and
@@ -596,15 +718,23 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     frontierToTarget = computeShortestPathFromCostmap(costMap, selectedFrontierPt);
   }
 
+  ROS_INFO_COND(debug, "[TIMING] Frontier shortest path computation: %.4f",
+                timer.Toc());
+
   // ##### Find path from drone to frontier #####
 
   // Extract skeleton for the contour that contains the UAV
   cv::Mat skeleton;
   cv::ximgproc::thinning(traversible, skeleton);
 
+  ROS_INFO_COND(debug, "[TIMING] Medial axis on traversible region: %.4f", timer.Toc());
+
   // Mat to vector for skeleton points
   std::vector<cv::Point> skeletonPts;
   cv::findNonZero(skeleton, skeletonPts);
+
+  ROS_INFO_COND(debug, "[TIMING] Skeleton image to skeleton coordinates: %.4f",
+                timer.Toc());
 
   if (skeletonPts.empty()) {
     ROS_ERROR("Skeleton could not be computed. Investigate");
@@ -640,6 +770,10 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     }
   }
 
+  ROS_INFO_COND(debug,
+                "[TIMING] Finding cloest LoS skeleton point to the frontier: %.4f",
+                timer.Toc());
+
   // Find skeleton point closest to the drone with LoS visibility
   currentDistance = std::numeric_limits<float>::max();
 
@@ -664,8 +798,14 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     }
   }
 
+  ROS_INFO_COND(debug,
+                "[TIMING] Finding cloest LoS skeleton point to the UAV location: %.4f",
+                timer.Toc());
+
   // Find path along the skeleton between entryPoint and exitPoint
   alongSkeleton = findPathAlongSkeleton(skeletonPts, entrySkeletonPt, exitSkeletonPt);
+
+  ROS_INFO_COND(debug, "[TIMING] Finding path along the skeleton: %.4f", timer.Toc());
 
   // Convert path points to real coordinates and an angle
   // Each node is facing the next node in line. Last node faces the frontier
@@ -750,6 +890,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     return;
   }
 
+  ROS_INFO_COND(debug, "[TIMING] Path composition: %.4f", timer.Toc());
+
   const size_t N = pathX.size();
 
   // Filter x, y, and yaw separately with a FIR (order 10, cutoff 0.01)
@@ -803,6 +945,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     pathPoses[i].orientation.w = std::cos(t_filt / 2.);
   }
 
+  ROS_INFO_COND(debug, "[TIMING] Path filtering: %.4f", timer.Toc());
+
   // Publish message
   static uint32_t seq = 0;
   geometry_msgs::PoseArray uavToFrontier;
@@ -812,81 +956,14 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   uavToFrontier.poses = pathPoses;
   pathPub.publish(uavToFrontier);
 
-  // ##### Visualization #####
-
-  // Cost map
-  cv::Mat costMapVis = costMap.clone(), costMapInvalidMask;
-
-  // Replace uint16_t max with 0
-  cv::threshold(costMapVis, costMapInvalidMask,
-                std::numeric_limits<uint16_t>::max() - 2, 1, cv::THRESH_BINARY_INV);
-  costMapVis = costMapVis.mul(costMapInvalidMask);
-
-  // Put images in range of 0 - 255 in 8 bits
-  cv::normalize(costMapVis, costMapVis, 0, 255, cv::NORM_MINMAX);
-  costMapVis.convertTo(costMapVis, CV_8UC1);
-
-  // Remove overlapping costmap from traversible area
-  cv::Mat traversibleInverseMask;
-  cv::threshold(traversible, traversibleInverseMask, 100, 1, cv::THRESH_BINARY_INV);
-  costMapVis = costMapVis.mul(traversibleInverseMask);
-
-  // Base image
-  // Traversible region -> Green
-  // Frontier cost map -> Blue
-  // Occupied region -> Red (exact borders)
-  // Black space is either occupied safe (around occupied regions), or not
-  // discovered
-  cv::Mat visual;
-  // std::vector<cv::Mat> channels{traversible, free, occupied};
-  std::vector<cv::Mat> channels{costMapVis, traversible, occupied};
-  cv::merge(channels, visual);
-
-  // Skeleton (gray)
-  for (const auto& pt : skeletonPts) {
-    cv::circle(visual, pt, 0, cv::Scalar(100, 100, 100), 1);
-  }
-
-  // Add drone location on map (magenta circle)
-  size_t radius = static_cast<size_t>(kDroneRadius / kResolution);
-  cv::circle(visual, cv::Point(xCoordDrone, yCoordDrone), radius,
-             cv::Scalar(255, 0, 255), 1);
-
-  // Mark frontier points (white)
-  for (const auto& pt : frontier)
-    cv::circle(visual, pt, 0, cv::Scalar(255, 255, 255), 1);
-
-  // ### Paths ###
-
-  // UAV -> Skeleton (blue-ish)
-  for (const auto& pt : uavToSkeleton)
-    cv::circle(visual, pt, 0, cv::Scalar(255, 155, 0), 1);
-
-  // Along skeleton (light gray)
-  for (const auto& pt : alongSkeleton)
-    cv::circle(visual, pt, 0, cv::Scalar(200, 200, 200), 1);
-
-  // Skeleton -> frontier (orange)
-  for (const auto& pt : skeletonToFrontier)
-    cv::circle(visual, pt, 0, cv::Scalar(0, 155, 255), 1);
-
-  // Frontier -> target (yellow)
-  for (const auto& pt : frontierToTarget)
-    cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
-
-  // Add target location on map (purple)
-  cv::circle(visual, cv::Point(xCoordTarget, yCoordTarget), 0, cv::Scalar(100, 0, 100),
-             -1);
-
-  // Correct orientation
-  cv::flip(visual, visual, 0);
-
-  sensor_msgs::ImagePtr visMsg =
-      cv_bridge::CvImage(std_msgs::Header(), "bgr8", visual).toImageMsg();
-  debugVis.publish(visMsg);
+  visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
+            uavToSkeleton, alongSkeleton, skeletonToFrontier, frontierToTarget,
+            coordTarget, kResolution);
 
   // Free map pointers
   delete mapPtr;
+
+  ROS_INFO(" ##### Exiting pathfinder #####");
 
   return;
 }
