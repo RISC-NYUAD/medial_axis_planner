@@ -539,6 +539,41 @@ void visualize(const cv::Mat& costMap,
   debugVis.publish(visMsg);
 }
 
+cv::Point findClosestLoSSkeletonPoint(const std::vector<cv::Point>& skeletonPts,
+                                      const cv::Point& target,
+                                      const cv::Mat& traversible) {
+  // Find skeleton point closest to the selected frontier point with LoS visibility
+  float currentDistance = std::numeric_limits<float>::max();
+
+  cv::Point closestPoint;
+  bool setClosestPoint;
+
+  for (const cv::Point& pt : skeletonPts) {
+    cv::Point diff = pt - target;
+    float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+    if (dist < currentDistance) {
+      // LoS needed only if the distance is smaller
+      std::vector<cv::Point> lineOfSightPath =
+          computeLineOfSightPath(traversible, pt, target);
+
+      // If LoS path is empty, then there is no path
+      if (lineOfSightPath.empty()) {
+        continue;
+      } else {
+        currentDistance = dist;
+        setClosestPoint = true;
+        closestPoint = pt;
+      }
+    }
+  }
+
+  if (setClosestPoint == false) {
+    ROS_ERROR("No line-of-sight skeleton point exists");
+  }
+
+  return closestPoint;
+}
+
 void octomapCallback(const octomap_msgs::Octomap& msg) {
   Timer timer;
   timer.Tic();
@@ -670,230 +705,197 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   ROS_INFO_COND(debug, "[TIMING] 2D map processing: %.4f", timer.Toc());
 
-  // ##### Find path from frontier to target #####
-  std::vector<cv::Point> frontierToTarget;
-
-  // Extract frontier points
-  std::vector<cv::Point> frontier =
-      findFrontierPoints(traversible, occupiedSafe, coordDrone);
-
-  ROS_INFO_COND(debug, "[TIMING] Frontier computation: %.4f", timer.Toc());
-
-  // Without a frontier, cannot do anything
-  if (frontier.empty()) {
-    ROS_WARN("Frontier cannot be computed. Exiting");
-
-    cv::Mat costMap(traversible.size(), CV_8UC1, cv::Scalar(0));
-    std::vector<cv::Point> skeletonPts, uavToSkeleton, alongSkeleton,
-        skeletonToFrontier;
-
-    visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
-              uavToSkeleton, alongSkeleton, skeletonToFrontier, frontierToTarget,
-              coordTarget, kResolution);
-    return;
-  }
-
-  cv::Point selectedFrontierPt = frontier[frontier.size() / 2];
-
-  // Calculate distance map
-  std::vector<cv::Point> targetPoints{coordTarget};
-  cv::Mat costMap =
-      computeCostMap(frontier, traversible, occupiedSafe, targetPoints, coordDrone);
-
-  ROS_INFO_COND(debug, "[TIMING] Cost map computation: %.4f", timer.Toc());
-
-  // If costmap computation was successful, compute a path from frontier to the
-  // target otherwise, use frontier point in the middle as a placeholder, and
-  // return empty path
-  if (costMap.empty()) {
-    ROS_ERROR("Cost map empty. Investigate");
-  } else {
-    // Compute path from the frontier point with the shortest distance
-    for (const cv::Point& pt : frontier) {
-      if (costMap.at<uint16_t>(pt.y, pt.x) <
-          costMap.at<uint16_t>(selectedFrontierPt.y, selectedFrontierPt.x)) {
-        selectedFrontierPt = pt;
-      }
-    }
-    frontierToTarget = computeShortestPathFromCostmap(costMap, selectedFrontierPt);
-  }
-
-  ROS_INFO_COND(debug, "[TIMING] Frontier shortest path computation: %.4f",
-                timer.Toc());
-
-  // ##### Find path from drone to frontier #####
-
-  // Extract skeleton for the contour that contains the UAV
-  cv::Mat skeleton;
-  cv::ximgproc::thinning(traversible, skeleton);
-
-  ROS_INFO_COND(debug, "[TIMING] Medial axis on traversible region: %.4f", timer.Toc());
-
-  // Mat to vector for skeleton points
-  std::vector<cv::Point> skeletonPts;
-  cv::findNonZero(skeleton, skeletonPts);
-
-  ROS_INFO_COND(debug, "[TIMING] Skeleton image to skeleton coordinates: %.4f",
-                timer.Toc());
-
-  if (skeletonPts.empty()) {
-    ROS_ERROR("Skeleton could not be computed. Investigate");
-    return;
-  }
+  // ##### Path computation #####
+  // Two cases: Target is inside traversible region that the UAV is in, or outside
+  // if inside, simply traverse along the skeleton
+  // if outside, find the closest frontier, and traverse there
 
   // Placeholders
-  cv::Point exitSkeletonPt = skeletonPts[skeletonPts.size() / 2];
-  cv::Point entrySkeletonPt = skeletonPts[skeletonPts.size() / 2];
-  std::vector<cv::Point> skeletonToFrontier;
-  std::vector<cv::Point> alongSkeleton;
+  cv::Mat costMap;
+  std::vector<cv::Point> path, skeletonPts, frontier, uavToSkeleton, alongSkeleton,
+      skeletonToFrontier, frontierToTarget;
 
-  // Find skeleton point closest to the selected frontier point with LoS
-  // visibility
-  float currentDistance = std::numeric_limits<float>::max();
+  // Check if the target is inside the traversible contour that the UAV is in
+  std::vector<cv::Point> traversibleContour =
+      extractTraversibleContour(traversible, occupiedSafe, coordDrone, true);
 
-  for (const cv::Point& pt : skeletonPts) {
-    cv::Point diff = pt - selectedFrontierPt;
-    float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
-    if (dist < currentDistance) {
-      // LoS needed only if the distance is smaller
-      std::vector<cv::Point> lineOfSightPath =
-          computeLineOfSightPath(traversible, pt, selectedFrontierPt);
+  if (!traversibleContour.empty() &&
+      cv::pointPolygonTest(traversibleContour, coordTarget, false) > 0) {
+    ROS_INFO(">>> Target location is inside traversible region");
+    //
 
-      // If LoS path is empty, then there is no path
-      if (lineOfSightPath.empty()) {
-        continue;
-      } else {
-        currentDistance = dist;
-        exitSkeletonPt = pt;
-        skeletonToFrontier = lineOfSightPath;
+  } else {
+    // ##### Find path from frontier to target #####
+
+    // Extract frontier points
+    frontier = findFrontierPoints(traversible, occupiedSafe, coordDrone);
+
+    ROS_INFO_COND(debug, "[TIMING] Frontier computation: %.4f", timer.Toc());
+
+    // Without a frontier, cannot do anything
+    if (frontier.empty()) {
+      ROS_WARN("Frontier cannot be computed. Exiting");
+
+      cv::Mat costMap(traversible.size(), CV_8UC1, cv::Scalar(0));
+      std::vector<cv::Point> skeletonPts, uavToSkeleton, alongSkeleton,
+          skeletonToFrontier, frontierToTarget;
+
+      visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
+                uavToSkeleton, alongSkeleton, skeletonToFrontier, frontierToTarget,
+                coordTarget, kResolution);
+      return;
+    }
+
+    // Select a default frontier point
+    cv::Point selectedFrontierPt = frontier[frontier.size() / 2];
+
+    // Calculate distance map
+    std::vector<cv::Point> targetPoints{coordTarget};
+    costMap =
+        computeCostMap(frontier, traversible, occupiedSafe, targetPoints, coordDrone);
+
+    ROS_INFO_COND(debug, "[TIMING] Cost map computation: %.4f", timer.Toc());
+
+    // If costmap computation was successful, compute a path from frontier to the
+    // target otherwise, use frontier point in the middle as a placeholder, and
+    // return empty path
+    if (costMap.empty()) {
+      ROS_ERROR("Cost map empty. Investigate");
+    } else {
+      // Find the frontier point with the shortest distance
+      for (const cv::Point& pt : frontier) {
+        if (costMap.at<uint16_t>(pt.y, pt.x) <
+            costMap.at<uint16_t>(selectedFrontierPt.y, selectedFrontierPt.x)) {
+          selectedFrontierPt = pt;
+        }
+      }
+
+      // Compute path
+      frontierToTarget = computeShortestPathFromCostmap(costMap, selectedFrontierPt);
+    }
+
+    ROS_INFO_COND(debug, "[TIMING] Frontier shortest path computation: %.4f",
+                  timer.Toc());
+
+    // ##### Find path from drone to frontier #####
+
+    // Extract skeleton for the contour that contains the UAV
+    cv::Mat skeleton,
+        traversibleContourContainingUAVMask(traversible.size(), CV_8UC1, cv::Scalar(0));
+
+    std::vector<std::vector<cv::Point>> contourForFilling{traversibleContour};
+
+    cv::fillPoly(traversibleContourContainingUAVMask, contourForFilling, cv::Scalar(1));
+
+    cv::Mat traversibleContourContainingUAV =
+        traversible.mul(traversibleContourContainingUAVMask);
+    cv::ximgproc::thinning(traversibleContourContainingUAV, skeleton);
+
+    // cv::namedWindow("test", cv::WINDOW_NORMAL);
+    // cv::fillPoly(traversibleContourContainingUAVMask, traversibleContour,
+    //                    cv::Scalar(255));
+    // cv::cvtColor(traversibleContourContainingUAVMask,
+    // traversibleContourContainingUAVMask, cv::COLOR_GRAY2BGR);
+
+    // cv::imshow("test", traversibleContourContainingUAVMask);
+    // cv::waitKey(1);
+
+    ROS_INFO_COND(debug, "[TIMING] Medial axis on traversible region: %.4f",
+                  timer.Toc());
+
+    // Mat to vector for skeleton points
+    cv::findNonZero(skeleton, skeletonPts);
+
+    ROS_INFO_COND(debug, "[TIMING] Skeleton image to skeleton coordinates: %.4f",
+                  timer.Toc());
+
+    if (skeletonPts.empty()) {
+      ROS_ERROR("Skeleton could not be computed. Investigate");
+      return;
+    }
+
+    // Placeholders
+    cv::Point exitSkeletonPt = skeletonPts[skeletonPts.size() / 2];
+    cv::Point entrySkeletonPt = skeletonPts[skeletonPts.size() / 2];
+
+    // Find skeleton point closest to the selected frontier point with LoS
+    // visibility
+    float currentDistance = std::numeric_limits<float>::max();
+
+    for (const cv::Point& pt : skeletonPts) {
+      cv::Point diff = pt - selectedFrontierPt;
+      float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+      if (dist < currentDistance) {
+        // LoS needed only if the distance is smaller
+        std::vector<cv::Point> lineOfSightPath =
+            computeLineOfSightPath(traversible, pt, selectedFrontierPt);
+
+        // If LoS path is empty, then there is no path
+        if (lineOfSightPath.empty()) {
+          continue;
+        } else {
+          currentDistance = dist;
+          exitSkeletonPt = pt;
+          skeletonToFrontier = lineOfSightPath;
+        }
       }
     }
-  }
 
-  ROS_INFO_COND(debug,
-                "[TIMING] Finding cloest LoS skeleton point to the frontier: %.4f",
-                timer.Toc());
+    ROS_INFO_COND(debug,
+                  "[TIMING] Finding cloest LoS skeleton point to the frontier: %.4f",
+                  timer.Toc());
 
-  // Find skeleton point closest to the drone with LoS visibility
-  currentDistance = std::numeric_limits<float>::max();
+    // Find skeleton point closest to the drone with LoS visibility
+    currentDistance = std::numeric_limits<float>::max();
 
-  std::vector<cv::Point> uavToSkeleton;
+    for (const cv::Point& pt : skeletonPts) {
+      cv::Point diff = pt - coordDrone;
+      float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
+      if (dist < currentDistance) {
+        // LoS needed only if the distance is smaller
+        std::vector<cv::Point> lineOfSightPath =
+            computeLineOfSightPath(traversible, coordDrone, pt);
 
-  for (const cv::Point& pt : skeletonPts) {
-    cv::Point diff = pt - coordDrone;
-    float dist = std::sqrt(diff.x * diff.x + diff.y * diff.y);
-    if (dist < currentDistance) {
-      // LoS needed only if the distance is smaller
-      std::vector<cv::Point> lineOfSightPath =
-          computeLineOfSightPath(traversible, coordDrone, pt);
-
-      // If LoS path is empty, then there is no viable path
-      if (lineOfSightPath.empty()) {
-        continue;
-      } else {
-        currentDistance = dist;
-        entrySkeletonPt = pt;
-        uavToSkeleton = lineOfSightPath;
+        // If LoS path is empty, then there is no viable path
+        if (lineOfSightPath.empty()) {
+          continue;
+        } else {
+          currentDistance = dist;
+          entrySkeletonPt = pt;
+          uavToSkeleton = lineOfSightPath;
+        }
       }
     }
+
+    ROS_INFO_COND(
+        debug, "[TIMING] Finding cloest LoS skeleton point to the UAV location: %.4f",
+        timer.Toc());
+
+    // Find path along the skeleton between entryPoint and exitPoint
+    alongSkeleton = findPathAlongSkeleton(skeletonPts, entrySkeletonPt, exitSkeletonPt);
+
+    ROS_INFO_COND(debug, "[TIMING] Finding path along the skeleton: %.4f", timer.Toc());
+
+    path.insert(path.end(), uavToSkeleton.begin(), uavToSkeleton.end());
+    path.insert(path.end(), alongSkeleton.begin(), alongSkeleton.end());
+    path.insert(path.end(), skeletonToFrontier.begin(), skeletonToFrontier.end());
   }
-
-  ROS_INFO_COND(debug,
-                "[TIMING] Finding cloest LoS skeleton point to the UAV location: %.4f",
-                timer.Toc());
-
-  // Find path along the skeleton between entryPoint and exitPoint
-  alongSkeleton = findPathAlongSkeleton(skeletonPts, entrySkeletonPt, exitSkeletonPt);
-
-  ROS_INFO_COND(debug, "[TIMING] Finding path along the skeleton: %.4f", timer.Toc());
 
   // Convert path points to real coordinates and an angle
   // Each node is facing the next node in line. Last node faces the frontier
   // point
   std::vector<float> pathYaw, pathX, pathY;
 
-  // From the line from UAV to skeleton. Excluding last point, which will be
-  // calculated using first point of skeleton
-  if (uavToSkeleton.size() > 1) {
-    for (size_t i = 1; i < uavToSkeleton.size(); ++i) {
-      float xCurr = static_cast<float>(uavToSkeleton[i - 1].x) * kResolution + mapXMin,
-            yCurr = static_cast<float>(uavToSkeleton[i - 1].y) * kResolution + mapYMin,
-            xNext = static_cast<float>(uavToSkeleton[i].x) * kResolution + mapXMin,
-            yNext = static_cast<float>(uavToSkeleton[i].y) * kResolution + mapYMin;
+  // Exclude last point. No angle defined, and no need to get too close to the frontier
+  for (size_t i = 1; i < path.size(); ++i) {
+    float xCurr = static_cast<float>(path[i - 1].x) * kResolution + mapXMin,
+          yCurr = static_cast<float>(path[i - 1].y) * kResolution + mapYMin,
+          xNext = static_cast<float>(path[i].x) * kResolution + mapXMin,
+          yNext = static_cast<float>(path[i].y) * kResolution + mapYMin;
 
-      pathX.push_back(xCurr);
-      pathY.push_back(yCurr);
-      pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
-    }
-
-    // From uavToSkeleton to alongSkeleton
-    {
-      const cv::Point& uavToSkeletonLast = uavToSkeleton[uavToSkeleton.size() - 1];
-      pathX.push_back(static_cast<float>(uavToSkeletonLast.x) * kResolution + mapXMin);
-      pathY.push_back(static_cast<float>(uavToSkeletonLast.y) * kResolution + mapYMin);
-      pathYaw.push_back(std::atan2(uavToSkeletonLast.y - skeletonToFrontier[0].y,
-                                   uavToSkeletonLast.x - skeletonToFrontier[0].x));
-    }
-  }
-
-  // PathYaw for skeleton. Excluding last point, which will be calculated using
-  // first point of skeletonToFrontier
-  if (alongSkeleton.size() > 1) {
-    for (size_t i = 1; i < alongSkeleton.size(); ++i) {
-      float xCurr = static_cast<float>(alongSkeleton[i - 1].x) * kResolution + mapXMin,
-            yCurr = static_cast<float>(alongSkeleton[i - 1].y) * kResolution + mapYMin,
-            xNext = static_cast<float>(alongSkeleton[i].x) * kResolution + mapXMin,
-            yNext = static_cast<float>(alongSkeleton[i].y) * kResolution + mapYMin;
-
-      pathX.push_back(xCurr);
-      pathY.push_back(yCurr);
-      pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
-    }
-
-    // From skeleton to frontier
-    {
-      const cv::Point& skeletonLast = alongSkeleton[alongSkeleton.size() - 1];
-      pathX.push_back(static_cast<float>(skeletonLast.x) * kResolution + mapXMin);
-      pathY.push_back(static_cast<float>(skeletonLast.y) * kResolution + mapYMin);
-      pathYaw.push_back(std::atan2(skeletonLast.y - skeletonToFrontier[0].y,
-                                   skeletonLast.x - skeletonToFrontier[0].x));
-    }
-  }
-
-  // PathYaw for the line from skeleton to frontier. Excluding last point, which
-  // will be calculated using the frontier point
-  if (skeletonToFrontier.size() > 1) {
-    for (size_t i = 1; i < skeletonToFrontier.size(); ++i) {
-      float xCurr =
-                static_cast<float>(skeletonToFrontier[i - 1].x) * kResolution + mapXMin,
-            yCurr =
-                static_cast<float>(skeletonToFrontier[i - 1].y) * kResolution + mapYMin,
-            xNext = static_cast<float>(skeletonToFrontier[i].x) * kResolution + mapXMin,
-            yNext = static_cast<float>(skeletonToFrontier[i].y) * kResolution + mapYMin;
-
-      pathX.push_back(xCurr);
-      pathY.push_back(yCurr);
-      pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
-    }
-
-    // From skeletonToFrontier to selectedFrontierPt
-    {
-      const cv::Point& skeletonToFrontierLast =
-          skeletonToFrontier[skeletonToFrontier.size() - 1];
-      pathX.push_back(static_cast<float>(skeletonToFrontierLast.x) * kResolution +
-                      mapXMin);
-      pathY.push_back(static_cast<float>(skeletonToFrontierLast.y) * kResolution +
-                      mapYMin);
-      pathYaw.push_back(std::atan2(skeletonToFrontierLast.y - selectedFrontierPt.y,
-                                   skeletonToFrontierLast.x - selectedFrontierPt.x));
-    }
-  }
-
-  if (pathX.size() != pathY.size() or pathY.size() != pathYaw.size()) {
-    ROS_ERROR("pathX.size(): %d, pathY.size(): %d, pathYaw.size(): %d",
-              static_cast<int>(pathX.size()), static_cast<int>(pathY.size()),
-              static_cast<int>(pathYaw.size()));
-    return;
+    pathX.push_back(xCurr);
+    pathY.push_back(yCurr);
+    pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
   }
 
   ROS_INFO_COND(debug, "[TIMING] Path composition: %.4f", timer.Toc());
