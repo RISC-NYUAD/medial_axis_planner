@@ -47,7 +47,7 @@ const double kMapSliceZThickness = 0.2;
 const double kMinHeight = 0.0, kMaxHeight = 3.0;
 
 // Target coordinates in map frame
-const cv::Point2d posTarget(5.0, -5.0);
+const cv::Point2d posTarget(6.0, -5.0);
 
 // Drone radius and safety margin (in meters). Occupied cells will be expanded
 // by kDroneRadius * 2 + kSafetymargin to avoid collisions
