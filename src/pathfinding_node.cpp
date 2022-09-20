@@ -983,7 +983,7 @@ int main(int argc, char** argv) {
   tf2_ros::TransformListener tfListener(tfBuffer);
   image_transport::ImageTransport imageTransport(nh);
   debugVis = imageTransport.advertise("debug_vis", 1);
-  pathPub = nh.advertise<geometry_msgs::PoseArray>("navigation_path", 1);
+  pathPub = nh.advertise<geometry_msgs::PoseArray>("navigation_path", 1, true);
 
   ros::Subscriber octomapMsgSubscriber =
       nh.subscribe("/rtabmap/octomap_binary", 1, octomapCallback);
