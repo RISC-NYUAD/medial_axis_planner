@@ -47,7 +47,11 @@ const double kMapSliceZThickness = 0.2;
 const double kMinHeight = 0.0, kMaxHeight = 3.0;
 
 // Target coordinates in map frame
-const cv::Point2d posTarget(6.0, -5.0);
+std::vector<cv::Point2d> posTarget;
+cv::Point2d targetMin(std::numeric_limits<double>::max(),
+                      std::numeric_limits<double>::max()),
+    targetMax(std::numeric_limits<double>::lowest(),
+              std::numeric_limits<double>::lowest());
 
 // Drone radius and safety margin (in meters). Occupied cells will be expanded
 // by kDroneRadius * 2 + kSafetymargin to avoid collisions
@@ -135,14 +139,12 @@ std::vector<cv::Point> findFrontierPoints(const cv::Mat& traversible,
   return frontier;
 }
 
-// Compute the cost map from target point to all frontier points using
+// Compute the cost map from target coordinate(s) to starting point(s) using
 // breadth-first search
-cv::Mat computeCostMap(const std::vector<cv::Point>& frontier,
+cv::Mat computeCostMap(const std::vector<cv::Point>& startingCoordinates,
                        const cv::Mat& traversible,
                        const cv::Mat& occupiedSafe,
-                       const std::vector<cv::Point>& targetCoordinates,
-                       const cv::Point& droneCoordinates) {
-  // Extract simplified contour of occupied safe region
+                       const std::vector<cv::Point>& targetCoordinates) {
   // Find contours of traversible_ region
   std::vector<std::vector<cv::Point>> contoursOccupiedSafe;
   std::vector<cv::Point> relevantContour;
@@ -164,14 +166,12 @@ cv::Mat computeCostMap(const std::vector<cv::Point>& frontier,
 
   // Combine all points for convex hull calculation
   std::vector<cv::Point> hullPointSet;
-  hullPointSet.insert(hullPointSet.end(), frontier.begin(), frontier.end());
+  hullPointSet.insert(hullPointSet.end(), startingCoordinates.begin(),
+                      startingCoordinates.end());
   hullPointSet.insert(hullPointSet.end(), contourOccupiedSafe.begin(),
                       contourOccupiedSafe.end());
   hullPointSet.insert(hullPointSet.end(), targetCoordinates.begin(),
                       targetCoordinates.end());
-
-  // ROS_INFO("Num. pts for hull calculation: %d",
-  //          static_cast<int>(hullPointSet.size()));
 
   std::vector<cv::Point> hull;
   cv::convexHull(hullPointSet, hull);
@@ -195,7 +195,7 @@ cv::Mat computeCostMap(const std::vector<cv::Point>& frontier,
   cv::Mat distances(allowedRegion.rows, allowedRegion.cols, CV_16UC1,
                     cv::Scalar(std::numeric_limits<uint16_t>::max()));
 
-  // Create a queue of cv coordinates for BFS search
+  // Create a queue of cv coordinates for breadth-first search
   std::queue<cv::Point> pixelQueue;
 
   // Target coordinates have distance 0
@@ -204,9 +204,9 @@ cv::Mat computeCostMap(const std::vector<cv::Point>& frontier,
     distances.at<uint16_t>(coord.y, coord.x) = 0;
   }
 
-  // Count number of frontier points reached during BFS, to terminate early
-  size_t numFrontierPointsReached = 0;
-  const size_t numFrontierPoints = frontier.size();
+  // Count number of starting points reached during BFS, to terminate early
+  size_t numStartingPointsReached = 0;
+  const size_t numStartingPoints = startingCoordinates.size();
 
   while (!pixelQueue.empty()) {
     cv::Point currentPx = pixelQueue.front();
@@ -239,17 +239,17 @@ cv::Mat computeCostMap(const std::vector<cv::Point>& frontier,
         pixelQueue.push(neighborPt);
 
         // If it is a frontier node, increment the counter
-        for (const auto& pt : frontier)
+        for (const auto& pt : startingCoordinates)
           if (currentPx == pt)
-            ++numFrontierPointsReached;
+            ++numStartingPointsReached;
       }
     }
 
     // Remove the currently processed node
     pixelQueue.pop();
 
-    // Exit if all frontier points are reached
-    if (numFrontierPointsReached == numFrontierPoints) {
+    // Exit if at least one starting point is reached
+    if (numStartingPointsReached > 0) {
       break;
     }
   }
@@ -469,7 +469,7 @@ void visualize(const cv::Mat& costMap,
                const std::vector<cv::Point>& alongSkeleton,
                const std::vector<cv::Point>& skeletonToTarget,
                const std::vector<cv::Point>& frontierToTarget,
-               const cv::Point& coordTarget,
+               const std::vector<cv::Point>& coordsTarget,
                const float& kResolution) {
   // ##### Visualization #####
 
@@ -539,7 +539,8 @@ void visualize(const cv::Mat& costMap,
     cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
 
   // Add target location on map (purple)
-  cv::circle(visual, coordTarget, 0, cv::Scalar(100, 0, 100), -1);
+  for (const auto& pt : coordsTarget)
+    cv::circle(visual, pt, 0, cv::Scalar(100, 0, 100), -1);
 
   // Correct orientation
   cv::flip(visual, visual, 0);
@@ -614,10 +615,10 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   // Maximum width / height of 2D map depends on the target point as well
   // Expanding to account for area surrounding occupied borders
-  const double mapXMin = std::min(xMin, posTarget.x) - kResolution * 5,
-               mapYMin = std::min(yMin, posTarget.y) - kResolution * 5,
-               mapXMax = std::max(xMax, posTarget.x) + kResolution * 5,
-               mapYMax = std::max(yMax, posTarget.y) + kResolution * 5;
+  const double mapXMin = std::min(xMin, targetMin.x) - kResolution * 5,
+               mapYMin = std::min(yMin, targetMin.y) - kResolution * 5,
+               mapXMax = std::max(xMax, targetMax.x) + kResolution * 5,
+               mapYMax = std::max(yMax, targetMax.y) + kResolution * 5;
 
   ROS_INFO_COND(debug, "[TIMING] Map bound extraction: %.4f", timer.Toc());
 
@@ -643,12 +644,15 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
              std::round((uavPose.transform.translation.y - mapYMin) / kResolution));
   const cv::Point coordDrone(xCoordDrone, yCoordDrone);
 
-  size_t xCoordTarget =
-             static_cast<size_t>(std::round((posTarget.x - mapXMin) / kResolution)),
-         yCoordTarget =
-             static_cast<size_t>(std::round((posTarget.y - mapYMin) / kResolution));
+  std::vector<cv::Point> coordsTarget;
 
-  const cv::Point coordTarget(xCoordTarget, yCoordTarget);
+  for (const cv::Point2d& pt : posTarget) {
+    size_t xCoordTarget =
+               static_cast<size_t>(std::round((pt.x - mapXMin) / kResolution)),
+           yCoordTarget =
+               static_cast<size_t>(std::round((pt.y - mapYMin) / kResolution));
+    coordsTarget.push_back(cv::Point2d(xCoordTarget, yCoordTarget));
+  }
 
   ROS_INFO_COND(debug, "[TIMING] UAV / Target coordinate to image computation: %.4f",
                 timer.Toc());
@@ -741,7 +745,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     ROS_WARN("Empty contour. Cannot calculate path");
     visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
               uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-              coordTarget, kResolution);
+              coordsTarget, kResolution);
     delete mapPtr;
     return;
   }
@@ -769,7 +773,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     ROS_ERROR("Skeleton could not be computed. Investigate");
     visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
               uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-              coordTarget, kResolution);
+              coordsTarget, kResolution);
     delete mapPtr;
     return;
   }
@@ -785,11 +789,29 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
                 "[TIMING] Finding cloest LoS skeleton point to the UAV location: %.4f",
                 timer.Toc());
 
-  if (!traversibleRegionContainingUAV.empty() &&
-      cv::pointPolygonTest(traversibleRegionContainingUAV, coordTarget, false) > 0) {
-    ROS_INFO(">>> Target location is inside the traversible region");
+  std::vector<cv::Point> targetsInTraversibleRegion;
+  for (const cv::Point& pt : coordsTarget) {
+    if (!traversibleRegionContainingUAV.empty() &&
+        cv::pointPolygonTest(traversibleRegionContainingUAV, pt, false) > 0) {
+      targetsInTraversibleRegion.push_back(pt);
+    }
+  }
 
-    // Path from UAV to skeleton
+  if (!targetsInTraversibleRegion.empty()) {
+    ROS_INFO(">>> Target location is inside the traversible region");
+    std::vector<cv::Point> coordDroneVec{coordDrone};
+    cv::Mat costMapDroneToTarget = computeCostMap(
+        targetsInTraversibleRegion, traversible, occupiedSafe, coordDroneVec);
+
+    // Identify the closest point
+    cv::Point coordTarget = targetsInTraversibleRegion[0];
+    for (const cv::Point& pt : targetsInTraversibleRegion) {
+      if (costMapDroneToTarget.at<uint16_t>(pt) <
+          costMapDroneToTarget.at<uint16_t>(coordTarget))
+        coordTarget = pt;
+    }
+
+    // Path from skeleton to target
     cv::Point exitSkeletonPt =
         findClosestLoSSkeletonPoint(skeletonPts, coordTarget, traversible);
     skeletonToTarget = computeLineOfSightPath(traversible, exitSkeletonPt, coordTarget);
@@ -818,15 +840,13 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
       visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
                 uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-                coordTarget, kResolution);
+                coordsTarget, kResolution);
       delete mapPtr;
       return;
     }
 
     // Calculate distance map
-    std::vector<cv::Point> targetPoints{coordTarget};
-    costMap =
-        computeCostMap(frontier, traversible, occupiedSafe, targetPoints, coordDrone);
+    costMap = computeCostMap(frontier, traversible, occupiedSafe, coordsTarget);
 
     ROS_INFO_COND(debug, "[TIMING] Cost map computation: %.4f", timer.Toc());
 
@@ -837,7 +857,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
       ROS_ERROR("Cost map empty. Investigate");
       visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
                 uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-                coordTarget, kResolution);
+                coordsTarget, kResolution);
       delete mapPtr;
       return;
     }
@@ -874,9 +894,9 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     ROS_INFO_COND(debug, "[TIMING] Finding path along the skeleton: %.4f", timer.Toc());
   }
 
-  ROS_INFO("AlongSkeleton: %d, skeletonToTarget: %d",
-           static_cast<int>(alongSkeleton.size()),
-           static_cast<int>(skeletonToTarget.size()));
+  // ROS_INFO("AlongSkeleton: %d, skeletonToTarget: %d",
+  //          static_cast<int>(alongSkeleton.size()),
+  //          static_cast<int>(skeletonToTarget.size()));
 
   // Append the paths along and after skeleton
   path.insert(path.end(), alongSkeleton.begin(), alongSkeleton.end());
@@ -980,7 +1000,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
             uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-            coordTarget, kResolution);
+            coordsTarget, kResolution);
 
   // Free map pointers
   delete mapPtr;
@@ -988,6 +1008,47 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   ROS_INFO(" ##### Exiting pathfinder #####");
 
   return;
+}
+
+// To be replaced with a topic callback later
+std::vector<cv::Point2d> readCoordinatesFromFile(std::string fileName) {
+  std::ifstream pathfile;
+  pathfile.open(fileName, std::ios::in);
+  ROS_INFO("Filename %s ", fileName.c_str());
+  if (pathfile.fail()) {
+    throw std::ios_base::failure(std::strerror(errno));
+    exit(-1);
+  } else {
+    ROS_INFO("Reading target coordinates from file...");
+  }
+  std::string line, item;
+  std::vector<double> nums;
+  std::vector<cv::Point2d> coordinates;
+
+  while (std::getline(pathfile, line)) {
+    std::istringstream ss;
+    ss.str(line);
+    while (std::getline(ss, item, ',')) {
+      nums.push_back(std::stod(item));
+    }
+    cv::Point2d point(nums.at(0), nums.at(1));
+
+    // Update bounds
+    if (nums.at(0) > targetMax.x)
+      targetMax.x = nums.at(0);
+    if (nums.at(1) > targetMax.y)
+      targetMax.y = nums.at(1);
+
+    if (nums.at(0) < targetMin.x)
+      targetMin.x = nums.at(0);
+    if (nums.at(1) < targetMin.y)
+      targetMin.y = nums.at(1);
+
+    coordinates.push_back(point);
+    nums.clear();
+  }
+
+  return coordinates;
 }
 
 int main(int argc, char** argv) {
@@ -998,6 +1059,11 @@ int main(int argc, char** argv) {
 
   tf2_ros::TransformListener tfListener(tfBuffer);
   image_transport::ImageTransport imageTransport(nh);
+
+  // Read target coordinates from a file
+  posTarget = readCoordinatesFromFile(argv[1]);
+
+  // Publishers
   debugVis = imageTransport.advertise("debug_vis", 1);
   pathPub = nh.advertise<geometry_msgs::PoseArray>("navigation_path", 1, true);
 
