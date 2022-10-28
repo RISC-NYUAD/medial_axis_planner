@@ -1,8 +1,11 @@
+#include <aerosim_comm/PointArray.h>
 #include <cv_bridge/cv_bridge.h>
+#include <geometry_msgs/Point.h>
 #include <geometry_msgs/PoseArray.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <geometry_msgs/Vector3.h>
 #include <image_transport/image_transport.h>
+#include <nav_msgs/OccupancyGrid.h>
 #include <octomap_msgs/Octomap.h>
 #include <octomap_msgs/conversions.h>
 #include <ros/ros.h>
@@ -18,6 +21,7 @@
 #include <queue>
 
 #include "geometry_msgs/Quaternion.h"
+#include "nav_msgs/MapMetaData.h"
 #include "octomap/AbstractOcTree.h"
 #include "octomap/OcTree.h"
 #include "octomap/OcTreeKey.h"
@@ -29,6 +33,7 @@
 #include "ros/duration.h"
 #include "ros/node_handle.h"
 #include "ros/publisher.h"
+#include "ros/time.h"
 #include "std_msgs/String.h"
 #include "tf2/exceptions.h"
 #include "tf2_ros/buffer.h"
@@ -47,11 +52,10 @@ const double kMapSliceZThickness = 0.2;
 const double kMinHeight = 0.0, kMaxHeight = 3.0;
 
 // Target coordinates in map frame
-std::vector<cv::Point2d> posTarget;
-cv::Point2d targetMin(std::numeric_limits<double>::max(),
-                      std::numeric_limits<double>::max()),
-    targetMax(std::numeric_limits<double>::lowest(),
-              std::numeric_limits<double>::lowest());
+std::vector<geometry_msgs::Point> posTarget;
+std::mutex targetLock;
+
+geometry_msgs::Point targetMin, targetMax;
 
 // Drone radius and safety margin (in meters). Occupied cells will be expanded
 // by kDroneRadius * 2 + kSafetymargin to avoid collisions
@@ -66,6 +70,47 @@ const bool debug = true;
 // ##### Publishers #####
 image_transport::Publisher debugVis;  // Debug visualization
 ros::Publisher pathPub;               // Publishes path from uav to frontier
+ros::Publisher occupancyPub;          // Publishes expanded occupied cells
+
+// Publish occupied safe coordinates
+// Occupied safe refers to occupied map coordinates expanded to allow safe flight.
+// Traversible region is free space excluding occupied safe pixels
+void publishOccupiedSafeMap(const cv::Mat& occupiedSafe,
+                            double mapXMin,
+                            double mapYMin,
+                            double kResolution) {
+  // Construct metadata
+  nav_msgs::MapMetaData metadata;
+  metadata.map_load_time = ros::Time::now();
+  metadata.resolution = kResolution;
+  metadata.width = occupiedSafe.cols;
+  metadata.height = occupiedSafe.rows;
+
+  geometry_msgs::Pose origin;
+  origin.position.x = mapXMin;
+  origin.position.y = mapYMin;
+  origin.orientation.w = 1;
+  metadata.origin = origin;
+
+  nav_msgs::OccupancyGrid msg;
+  msg.header.frame_id = "map";
+  msg.header.stamp = metadata.map_load_time;
+  msg.info = metadata;
+
+  msg.data = std::vector<int8_t>(metadata.width * metadata.height, -1);
+
+  // Mat to vector of coordinates
+  std::vector<cv::Point> occupiedSafeCoordinates;
+  cv::findNonZero(occupiedSafe, occupiedSafeCoordinates);
+
+  // NOTE: NEED TO UPDATE THIS FOR 3D
+  for (const cv::Point& pt : occupiedSafeCoordinates) {
+    size_t idx = pt.y * metadata.width + pt.x;
+    msg.data[idx] = 100;
+  }
+
+  occupancyPub.publish(msg);
+}
 
 // Compute 8-neighbors of a given point
 std::vector<cv::Point> computeNeighbors(const cv::Point& pt) {
@@ -646,13 +691,17 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   std::vector<cv::Point> coordsTarget;
 
-  for (const cv::Point2d& pt : posTarget) {
+  // Acquire target coordinates
+  // NEED TO CONSIDER Z WHEN THE TARGETS ARE IN 3D
+  targetLock.lock();
+  for (const geometry_msgs::Point& pt : posTarget) {
     size_t xCoordTarget =
                static_cast<size_t>(std::round((pt.x - mapXMin) / kResolution)),
            yCoordTarget =
                static_cast<size_t>(std::round((pt.y - mapYMin) / kResolution));
     coordsTarget.push_back(cv::Point2d(xCoordTarget, yCoordTarget));
   }
+  targetLock.unlock();
 
   ROS_INFO_COND(debug, "[TIMING] UAV / Target coordinate to image computation: %.4f",
                 timer.Toc());
@@ -722,6 +771,9 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   cv::Mat occupiedSafe, occupiedSafeMask;
   cv::dilate(occupied, occupiedSafe, kernelSafety);
   cv::threshold(occupiedSafe, occupiedSafeMask, 100, 1, cv::THRESH_BINARY_INV);
+
+  // Publish occupied safe coordinates for target region handler
+  publishOccupiedSafeMap(occupiedSafe, mapXMin, mapYMin, kResolution);
 
   // Traversible: min. distance to an obstacle is 2 drone radii away
   // Traversible safe: min. dist to obstacles is ~3 drone radii from drone
@@ -921,7 +973,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   size_t N = pathX.size();
 
-  // Filter x, y, and yaw separately with a FIR (order 10, cutoff 0.01)
+  // Filter x, y, and yaw separately with an FIR filter (order 10, cutoff 0.01)
   const std::vector<float> kernel{
       0.014548974194706, 0.030571249925298, 0.072545157760889, 0.124486576686153,
       0.166541934360414, 0.182612214145080, 0.166541934360414, 0.124486576686153,
@@ -1010,7 +1062,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   return;
 }
 
-// To be replaced with a topic callback later
+// Read set of target coordinates from a file
 std::vector<cv::Point2d> readCoordinatesFromFile(std::string fileName) {
   std::ifstream pathfile;
   pathfile.open(fileName, std::ios::in);
@@ -1051,6 +1103,45 @@ std::vector<cv::Point2d> readCoordinatesFromFile(std::string fileName) {
   return coordinates;
 }
 
+// Read target points from target tracking callback
+void targetCallback(const aerosim_comm::PointArray& msg) {
+  targetLock.lock();
+
+  // Clear existing poses
+  posTarget.clear();
+
+  // Reset minimum / maximum, empty posTarget
+  targetMin.x = std::numeric_limits<double>::max();
+  targetMin.y = std::numeric_limits<double>::max();
+  targetMin.z = std::numeric_limits<double>::max();
+
+  targetMax.x = std::numeric_limits<double>::lowest();
+  targetMax.y = std::numeric_limits<double>::lowest();
+  targetMax.z = std::numeric_limits<double>::lowest();
+
+  for (const geometry_msgs::Point& pt : msg.points) {
+    posTarget.push_back(pt);
+
+    // Update bounds
+    if (pt.x > targetMax.x)
+      targetMax.x = pt.x;
+    if (pt.y > targetMax.y)
+      targetMax.y = pt.y;
+    if (pt.z > targetMax.z)
+      targetMax.z = pt.z;
+
+    if (pt.x < targetMin.x)
+      targetMin.x = pt.x;
+    if (pt.y < targetMin.y)
+      targetMin.y = pt.y;
+    if (pt.z < targetMin.z)
+      targetMin.z = pt.z;
+  }
+
+  // ROS_INFO_COND(debug, "Number of targets: %d", static_cast<int>(posTarget.size()));
+  targetLock.unlock();
+}
+
 int main(int argc, char** argv) {
   const std::string nodeName = "pathfinding_node";
   ros::init(argc, argv, nodeName);
@@ -1060,15 +1151,17 @@ int main(int argc, char** argv) {
   tf2_ros::TransformListener tfListener(tfBuffer);
   image_transport::ImageTransport imageTransport(nh);
 
-  // Read target coordinates from a file
-  posTarget = readCoordinatesFromFile(argv[1]);
+  // // Read target coordinates from a file
+  // posTarget = readCoordinatesFromFile(argv[1]);
 
   // Publishers
-  debugVis = imageTransport.advertise("debug_vis", 1);
+  debugVis = imageTransport.advertise("pathfinder_debug", 1);
   pathPub = nh.advertise<geometry_msgs::PoseArray>("navigation_path", 1, true);
+  occupancyPub = nh.advertise<nav_msgs::OccupancyGrid>("occupied_cells", 1, true);
 
   ros::Subscriber octomapMsgSubscriber =
       nh.subscribe("/rtabmap/octomap_binary", 1, octomapCallback);
+  ros::Subscriber targetSubscriber = nh.subscribe("targets", 1, targetCallback);
 
   ros::spin();
 

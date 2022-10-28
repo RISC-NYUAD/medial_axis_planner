@@ -19,6 +19,7 @@ find_package(catkin REQUIRED COMPONENTS
     octomap_server
     image_transport
     cv_bridge
+    aerosim_comm
 )
 
 find_package(Boost REQUIRED COMPONENTS thread)
@@ -36,6 +37,7 @@ catkin_package(
    octomap_server
    image_transport
    cv_bridge
+   aerosim_comm
 )
 
 
