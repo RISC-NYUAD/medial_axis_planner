@@ -2,43 +2,41 @@
 #include <cv_bridge/cv_bridge.h>
 #include <geometry_msgs/Point.h>
 #include <geometry_msgs/PoseArray.h>
+#include <geometry_msgs/Quaternion.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <geometry_msgs/Vector3.h>
 #include <image_transport/image_transport.h>
+#include <nav_msgs/MapMetaData.h>
 #include <nav_msgs/OccupancyGrid.h>
+#include <octomap/AbstractOcTree.h>
+#include <octomap/OcTree.h>
+#include <octomap/OcTreeKey.h>
 #include <octomap_msgs/Octomap.h>
 #include <octomap_msgs/conversions.h>
+#include <opencv2/core/cvdef.h>
+#include <opencv2/core/hal/interface.h>
+#include <ros/duration.h>
+#include <ros/node_handle.h>
+#include <ros/publisher.h>
 #include <ros/ros.h>
+#include <ros/time.h>
 #include <std_msgs/Int16.h>
+#include <std_msgs/String.h>
+#include <tf2/exceptions.h>
+#include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
-
+#include <visualization_msgs/MarkerArray.h>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <opencv2/core.hpp>
+#include <opencv2/core/types.hpp>
+#include <opencv2/imgproc.hpp>
 #include <opencv2/opencv.hpp>
 #include <opencv2/ximgproc.hpp>
 #include <queue>
-
-#include "geometry_msgs/Quaternion.h"
-#include "nav_msgs/MapMetaData.h"
-#include "octomap/AbstractOcTree.h"
-#include "octomap/OcTree.h"
-#include "octomap/OcTreeKey.h"
-#include "opencv2/core.hpp"
-#include "opencv2/core/cvdef.h"
-#include "opencv2/core/hal/interface.h"
-#include "opencv2/core/types.hpp"
-#include "opencv2/imgproc.hpp"
-#include "ros/duration.h"
-#include "ros/node_handle.h"
-#include "ros/publisher.h"
-#include "ros/time.h"
-#include "std_msgs/String.h"
-#include "tf2/exceptions.h"
-#include "tf2_ros/buffer.h"
-#include "timer.hpp"
-#include "visualization_msgs/MarkerArray.h"
+#include <timer.hpp>
 
 tf2_ros::Buffer tfBuffer;
 
@@ -63,9 +61,6 @@ const double kDroneRadius = 0.2, kSafetyMargin = 0.1;
 
 // Navigation height (z axis value)
 const double kNavigationHeight = 1.0;
-
-// Timing information debugging
-const bool debug = true;
 
 // ##### Publishers #####
 image_transport::Publisher debugVis;  // Debug visualization
@@ -255,7 +250,7 @@ cv::Mat computeCostMap(const std::vector<cv::Point>& startingCoordinates,
 
   while (!pixelQueue.empty()) {
     cv::Point currentPx = pixelQueue.front();
-    // ROS_INFO("x: %d, y:%d", currentPx.pt.x, currentPx.pt.y);
+    // ROS_DEBUG("x: %d, y:%d", currentPx.pt.x, currentPx.pt.y);
 
     // Add neighboring points (in 8-neighborhood) if they are
     // -> within image (needed so that convex hull check can be performed
@@ -270,7 +265,7 @@ cv::Mat computeCostMap(const std::vector<cv::Point>& startingCoordinates,
       bool ptIsNotInOccupiedSafe =
           occupiedSafe.at<uint8_t>(neighborPt.y, neighborPt.x) == 0;
 
-      // ROS_INFO(
+      // ROS_DEBUG(
       //     "(%d, %d) ptIsInImage = %s, ptIsAllowed = %s, ptIsNotVisited = %s",
       //     neighborPt.x, neighborPt.y, ptIsInImage ? "True" : "False",
       //     ptIsAllowed ? "True" : "False", ptIsNotVisited ? "True" : "False");
@@ -651,7 +646,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   octomap::AbstractOcTree* msgTree = octomap_msgs::binaryMsgToMap(msg);
   mapPtr = dynamic_cast<octomap::ColorOcTree*>(msgTree);
 
-  ROS_INFO_COND(debug, "[TIMING] Message to OcTree: %.4f", timer.Toc());
+  ROS_DEBUG("[TIMING] Message to OcTree: %.4f", timer.Toc());
 
   // Extract (metric) bounds of the known space (occupied or free)
   double xMax, yMax, zMax, xMin, yMin, zMin;
@@ -665,7 +660,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
                mapXMax = std::max(xMax, targetMax.x) + kResolution * 5,
                mapYMax = std::max(yMax, targetMax.y) + kResolution * 5;
 
-  ROS_INFO_COND(debug, "[TIMING] Map bound extraction: %.4f", timer.Toc());
+  ROS_DEBUG("[TIMING] Map bound extraction: %.4f", timer.Toc());
 
   // Obtain UAV location wrt to the map frame. Exit if cannot be retrieved
   geometry_msgs::TransformStamped uavPose;
@@ -680,7 +675,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     return;
   }
 
-  ROS_INFO_COND(debug, "[TIMING] UAV pose extraction: %.4f", timer.Toc());
+  ROS_DEBUG("[TIMING] UAV pose extraction: %.4f", timer.Toc());
 
   // Coordinates in the image frame
   size_t xCoordDrone = static_cast<size_t>(
@@ -703,8 +698,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   }
   targetLock.unlock();
 
-  ROS_INFO_COND(debug, "[TIMING] UAV / Target coordinate to image computation: %.4f",
-                timer.Toc());
+  ROS_DEBUG("[TIMING] UAV / Target coordinate to image computation: %.4f", timer.Toc());
 
   // Safety radius in image frame
   // Drone diameter + 0 extra radius + safety margin
@@ -714,7 +708,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
       cv::getStructuringElement(cv::MorphShapes::MORPH_ELLIPSE,
                                 cv::Size(droneSafetyDiameter, droneSafetyDiameter));
 
-  ROS_INFO_COND(debug, "[TIMING] Safety radius assignment: %.4f", timer.Toc());
+  ROS_DEBUG("[TIMING] Safety radius assignment: %.4f", timer.Toc());
 
   // ##### Project 3D-bounded map to a 2D binary occupancy
   // Set bounds of the map to be extracted
@@ -760,7 +754,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     }
   }
 
-  ROS_INFO_COND(debug, "[TIMING] Projecting map to 2D: %.4f", timer.Toc());
+  ROS_DEBUG("[TIMING] Projecting map to 2D: %.4f", timer.Toc());
 
   // Perform morphological closing on free map to eliminate small holes
   cv::Mat kernel3x3 =
@@ -780,7 +774,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   // center
   cv::Mat traversible = free.mul(occupiedSafeMask);
 
-  ROS_INFO_COND(debug, "[TIMING] 2D map processing: %.4f", timer.Toc());
+  ROS_DEBUG("[TIMING] 2D map processing: %.4f", timer.Toc());
 
   // ##### Path computation #####
   // Two cases: Target is inside traversible region that the UAV is in, or outside
@@ -813,13 +807,12 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
       traversible.mul(traversibleContourContainingUAVMask);
 
   cv::ximgproc::thinning(traversibleContourContainingUAV, skeleton);
-  ROS_INFO_COND(debug, "[TIMING] Medial axis on traversible region: %.4f", timer.Toc());
+  ROS_DEBUG("[TIMING] Medial axis on traversible region: %.4f", timer.Toc());
 
   // Mat to vector for skeleton points
   cv::findNonZero(skeleton, skeletonPts);
 
-  ROS_INFO_COND(debug, "[TIMING] Skeleton image to skeleton coordinates: %.4f",
-                timer.Toc());
+  ROS_DEBUG("[TIMING] Skeleton image to skeleton coordinates: %.4f", timer.Toc());
 
   if (skeletonPts.empty()) {
     ROS_ERROR("Skeleton could not be computed. Investigate");
@@ -837,9 +830,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   uavToSkeleton = computeLineOfSightPath(traversible, coordDrone, entrySkeletonPt);
   path.insert(path.end(), uavToSkeleton.begin(), uavToSkeleton.end());
 
-  ROS_INFO_COND(debug,
-                "[TIMING] Finding cloest LoS skeleton point to the UAV location: %.4f",
-                timer.Toc());
+  ROS_DEBUG("[TIMING] Finding cloest LoS skeleton point to the UAV location: %.4f",
+            timer.Toc());
 
   std::vector<cv::Point> targetsInTraversibleRegion;
   for (const cv::Point& pt : coordsTarget) {
@@ -850,10 +842,10 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   }
 
   if (!targetsInTraversibleRegion.empty()) {
-    ROS_INFO(">>> Target location is inside the traversible region");
     std::vector<cv::Point> coordDroneVec{coordDrone};
     cv::Mat costMapDroneToTarget = computeCostMap(
         targetsInTraversibleRegion, traversible, occupiedSafe, coordDroneVec);
+    ROS_DEBUG(">>> Target location is inside the traversible region");
 
     // Identify the closest point
     cv::Point coordTarget = targetsInTraversibleRegion[0];
@@ -875,16 +867,16 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     // Path along the skeleton between entryPoint and exitPoint
     alongSkeleton = findPathAlongSkeleton(skeletonPts, entrySkeletonPt, exitSkeletonPt);
 
-    ROS_INFO_COND(debug, "[TIMING] Finding path along the skeleton: %.4f", timer.Toc());
+    ROS_DEBUG("[TIMING] Finding path along the skeleton: %.4f", timer.Toc());
 
   } else {
-    ROS_INFO(">>> Target location is outside the traversible region");
+    ROS_DEBUG(">>> Target location is outside the traversible region");
 
     // ##### Find path from frontier to target #####
     // Extract frontier points
     frontier = findFrontierPoints(traversible, occupiedSafe, coordDrone);
 
-    ROS_INFO_COND(debug, "[TIMING] Frontier computation: %.4f", timer.Toc());
+    ROS_DEBUG("[TIMING] Frontier computation: %.4f", timer.Toc());
 
     // Without a frontier, cannot do anything
     if (frontier.empty()) {
@@ -900,7 +892,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     // Calculate distance map
     costMap = computeCostMap(frontier, traversible, occupiedSafe, coordsTarget);
 
-    ROS_INFO_COND(debug, "[TIMING] Cost map computation: %.4f", timer.Toc());
+    ROS_DEBUG("[TIMING] Cost map computation: %.4f", timer.Toc());
 
     // If costmap computation was successful, compute a path from frontier to the
     // target otherwise, use frontier point in the middle as a placeholder, and
@@ -928,25 +920,24 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     // Compute path
     frontierToTarget = computeShortestPathFromCostmap(costMap, selectedFrontierPt);
 
-    ROS_INFO_COND(debug, "[TIMING] Frontier shortest path computation: %.4f",
-                  timer.Toc());
+
+    ROS_DEBUG("[TIMING] Frontier shortest path computation: %.4f", timer.Toc());
 
     // Path from skeleton to frontier
     cv::Point exitSkeletonPt =
         findClosestLoSSkeletonPoint(skeletonPts, selectedFrontierPt, traversible);
     skeletonToTarget =
         computeLineOfSightPath(traversible, exitSkeletonPt, selectedFrontierPt);
-    ROS_INFO_COND(debug,
-                  "[TIMING] Finding cloest LoS skeleton point to the frontier: %.4f",
-                  timer.Toc());
+    ROS_DEBUG("[TIMING] Finding cloest LoS skeleton point to the frontier: %.4f",
+              timer.Toc());
 
     // Path along the skeleton between entryPoint and exitPoint
     alongSkeleton = findPathAlongSkeleton(skeletonPts, entrySkeletonPt, exitSkeletonPt);
 
-    ROS_INFO_COND(debug, "[TIMING] Finding path along the skeleton: %.4f", timer.Toc());
+    ROS_DEBUG("[TIMING] Finding path along the skeleton: %.4f", timer.Toc());
   }
 
-  // ROS_INFO("AlongSkeleton: %d, skeletonToTarget: %d",
+  // ROS_DEBUG("AlongSkeleton: %d, skeletonToTarget: %d",
   //          static_cast<int>(alongSkeleton.size()),
   //          static_cast<int>(skeletonToTarget.size()));
 
@@ -969,7 +960,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     pathYaw.push_back(std::atan2(yNext - yCurr, xNext - xCurr));
   }
 
-  ROS_INFO_COND(debug, "[TIMING] Path composition: %.4f", timer.Toc());
+  ROS_DEBUG("[TIMING] Path composition: %.4f", timer.Toc());
 
   size_t N = pathX.size();
 
@@ -1028,7 +1019,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
       pathPoses[i].orientation.w = std::cos(t_filt / 2.);
     }
 
-    ROS_INFO_COND(debug, "[TIMING] Path filtering: %.4f", timer.Toc());
+    ROS_DEBUG("[TIMING] Path filtering: %.4f", timer.Toc());
   } else {
     pathPoses = std::vector<geometry_msgs::Pose>(N);
     for (size_t i = 0; i < N; ++i) {
@@ -1057,7 +1048,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   // Free map pointers
   delete mapPtr;
 
-  ROS_INFO(" ##### Exiting pathfinder #####");
+  ROS_DEBUG(" ##### Exiting pathfinder #####");
 
   return;
 }
@@ -1066,12 +1057,12 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 std::vector<cv::Point2d> readCoordinatesFromFile(std::string fileName) {
   std::ifstream pathfile;
   pathfile.open(fileName, std::ios::in);
-  ROS_INFO("Filename %s ", fileName.c_str());
+  ROS_DEBUG("Filename %s ", fileName.c_str());
   if (pathfile.fail()) {
     throw std::ios_base::failure(std::strerror(errno));
     exit(-1);
   } else {
-    ROS_INFO("Reading target coordinates from file...");
+    ROS_DEBUG("Reading target coordinates from file...");
   }
   std::string line, item;
   std::vector<double> nums;
@@ -1138,7 +1129,7 @@ void targetCallback(const aerosim_comm::PointArray& msg) {
       targetMin.z = pt.z;
   }
 
-  // ROS_INFO_COND(debug, "Number of targets: %d", static_cast<int>(posTarget.size()));
+  // ROS_DEBUG("Number of targets: %d", static_cast<int>(posTarget.size()));
   targetLock.unlock();
 }
 
@@ -1155,7 +1146,7 @@ int main(int argc, char** argv) {
   // posTarget = readCoordinatesFromFile(argv[1]);
 
   // Publishers
-  debugVis = imageTransport.advertise("pathfinder_debug", 1);
+  debugVis = imageTransport.advertise("pathfinder_debug", 1, true);
   pathPub = nh.advertise<geometry_msgs::PoseArray>("navigation_path", 1, true);
   occupancyPub = nh.advertise<nav_msgs::OccupancyGrid>("occupied_cells", 1, true);
 
