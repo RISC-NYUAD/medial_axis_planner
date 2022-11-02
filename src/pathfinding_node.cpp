@@ -510,6 +510,7 @@ void visualize(const cv::Mat& costMap,
                const std::vector<cv::Point>& skeletonToTarget,
                const std::vector<cv::Point>& frontierToTarget,
                const std::vector<cv::Point>& coordsTarget,
+               const cv::Point& selectedTarget,
                const float& kResolution) {
   // ##### Visualization #####
 
@@ -574,13 +575,17 @@ void visualize(const cv::Mat& costMap,
   for (const auto& pt : skeletonToTarget)
     cv::circle(visual, pt, 0, cv::Scalar(0, 155, 255), 1);
 
+  // Add target location on map (purple)
+  for (const auto& pt : coordsTarget)
+    cv::circle(visual, pt, 0, cv::Scalar(100, 0, 100), -1);
+
   // Frontier -> target (yellow)
   for (const auto& pt : frontierToTarget)
     cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
 
-  // Add target location on map (purple)
-  for (const auto& pt : coordsTarget)
-    cv::circle(visual, pt, 0, cv::Scalar(100, 0, 100), -1);
+  // Add selected target point on map (magenta)
+  if (selectedTarget.x > -1)
+    cv::circle(visual, selectedTarget, 0, cv::Scalar(255, 0, 255), -1);
 
   // Correct orientation
   cv::flip(visual, visual, 0);
@@ -783,20 +788,21 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   cv::Mat costMap;
   std::vector<cv::Point> path, skeletonPts, frontier, uavToSkeleton, alongSkeleton,
       skeletonToTarget, frontierToTarget;
-
   std::vector<cv::Point> traversibleRegionContainingUAV =
-      extractTraversibleContour(free, coordDrone, true);
+      extractTraversibleContour(traversible, coordDrone, true);
+  cv::Point selectedTarget(-1, -1);
 
   if (traversibleRegionContainingUAV.empty()) {
     ROS_WARN("Empty contour. Cannot calculate path");
     visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
               uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-              coordsTarget, kResolution);
+              coordsTarget, selectedTarget, kResolution);
     delete mapPtr;
     return;
   }
 
   // Extract skeleton for the contour that contains the UAV
+  // BUG: This doesn't work when the contour contains holes
   cv::Mat skeleton,
       traversibleContourContainingUAVMask(traversible.size(), CV_8UC1, cv::Scalar(0));
   std::vector<std::vector<cv::Point>> contourForFilling{traversibleRegionContainingUAV};
@@ -818,7 +824,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     ROS_ERROR("Skeleton could not be computed. Investigate");
     visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
               uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-              coordsTarget, kResolution);
+              coordsTarget, selectedTarget, kResolution);
     delete mapPtr;
     return;
   }
@@ -842,27 +848,27 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   }
 
   if (!targetsInTraversibleRegion.empty()) {
-    std::vector<cv::Point> coordDroneVec{coordDrone};
-    cv::Mat costMapDroneToTarget = computeCostMap(
-        targetsInTraversibleRegion, traversible, occupiedSafe, coordDroneVec);
     ROS_DEBUG(">>> Target location is inside the traversible region");
 
+    // Find shortest (Chebyshev) path from target to skeleton
+    cv::Mat costMapSkeletonToTarget = computeCostMap(
+        targetsInTraversibleRegion, traversible, occupiedSafe, skeletonPts);
+
     // Identify the closest point
-    cv::Point coordTarget = targetsInTraversibleRegion[0];
+    selectedTarget = targetsInTraversibleRegion[0];
     for (const cv::Point& pt : targetsInTraversibleRegion) {
-      if (costMapDroneToTarget.at<uint16_t>(pt) <
-          costMapDroneToTarget.at<uint16_t>(coordTarget))
-        coordTarget = pt;
+      if (costMapSkeletonToTarget.at<uint16_t>(pt) <
+          costMapSkeletonToTarget.at<uint16_t>(selectedTarget))
+        selectedTarget = pt;
     }
 
     // Path from skeleton to target
     cv::Point exitSkeletonPt =
-        findClosestLoSSkeletonPoint(skeletonPts, coordTarget, traversible);
-    skeletonToTarget = computeLineOfSightPath(traversible, exitSkeletonPt, coordTarget);
-    ROS_INFO_COND(
-        debug,
-        "[TIMING] Finding cloest LoS skeleton point to the target location: %.4f",
-        timer.Toc());
+        findClosestLoSSkeletonPoint(skeletonPts, selectedTarget, traversible);
+    skeletonToTarget =
+        computeLineOfSightPath(traversible, exitSkeletonPt, selectedTarget);
+    ROS_DEBUG("[TIMING] Finding cloest LoS skeleton point to the target location: %.4f",
+              timer.Toc());
 
     // Path along the skeleton between entryPoint and exitPoint
     alongSkeleton = findPathAlongSkeleton(skeletonPts, entrySkeletonPt, exitSkeletonPt);
@@ -884,7 +890,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
       visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
                 uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-                coordsTarget, kResolution);
+                coordsTarget, selectedTarget, kResolution);
       delete mapPtr;
       return;
     }
@@ -901,7 +907,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
       ROS_ERROR("Cost map empty. Investigate");
       visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
                 uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-                coordsTarget, kResolution);
+                coordsTarget, selectedTarget, kResolution);
       delete mapPtr;
       return;
     }
@@ -920,6 +926,8 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     // Compute path
     frontierToTarget = computeShortestPathFromCostmap(costMap, selectedFrontierPt);
 
+    // End point in this path is the selected target point
+    selectedTarget = frontierToTarget[frontierToTarget.size() - 1];
 
     ROS_DEBUG("[TIMING] Frontier shortest path computation: %.4f", timer.Toc());
 
@@ -1043,7 +1051,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
             uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
-            coordsTarget, kResolution);
+            coordsTarget, selectedTarget, kResolution);
 
   // Free map pointers
   delete mapPtr;
