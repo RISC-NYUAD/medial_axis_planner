@@ -67,6 +67,13 @@ image_transport::Publisher debugVis;  // Debug visualization
 ros::Publisher pathPub;               // Publishes path from uav to frontier
 ros::Publisher occupancyPub;          // Publishes expanded occupied cells
 
+// Type to store contour information in a better form
+struct Contour {
+  std::vector<cv::Point> external;               // Points at the outermost boundary
+  std::vector<std::vector<cv::Point>> internal;  // Points at the boundary of holes
+  bool valid;
+};
+
 // Publish occupied safe coordinates
 // Occupied safe refers to occupied map coordinates expanded to allow safe flight.
 // Traversible region is free space excluding occupied safe pixels
@@ -123,27 +130,58 @@ std::vector<cv::Point> computeNeighbors(const cv::Point& pt) {
 }
 
 // Extract the contour of traversible region that the drone is in
-std::vector<cv::Point> extractTraversibleContour(const cv::Mat& traversible,
-                                                 const cv::Point& droneCoordinates,
-                                                 bool simplify) {
+Contour extractTraversibleContour(const cv::Mat& traversible,
+                                  const cv::Point& droneCoordinates,
+                                  bool simplify) {
   // Find contours of traversible_ region
   std::vector<std::vector<cv::Point>> contours;
-  std::vector<cv::Point> relevantContour;
   std::vector<cv::Vec4i> hierarchy;
 
   if (simplify)
-    cv::findContours(traversible, contours, hierarchy, cv::RETR_EXTERNAL,
+    cv::findContours(traversible, contours, hierarchy, cv::RETR_TREE,
                      cv::CHAIN_APPROX_SIMPLE);
   else
-    cv::findContours(traversible, contours, hierarchy, cv::RETR_EXTERNAL,
+    cv::findContours(traversible, contours, hierarchy, cv::RETR_TREE,
                      cv::CHAIN_APPROX_NONE);
 
   // Select the contour the drone is in
-  for (const auto& contour : contours) {
+  Contour relevantContour;
+  relevantContour.valid = false;
+  bool contourIsSet = false;
+
+  for (size_t i = 0; i < contours.size(); ++i) {
+    bool droneInHole = false;
+
+    const std::vector<cv::Point>& contour = contours[i];
+
+    // Check if the drone is inside the outermost boundaries
     if (cv::pointPolygonTest(contour, droneCoordinates, false) > 0) {
-      relevantContour = contour;
-      break;
+      // Check if the drone is not inside the holes of the contour
+      // Identify children
+      std::vector<std::vector<cv::Point>> childrenContours;
+      for (size_t j = 0; j < contours.size(); ++j)
+        if (hierarchy[j][3] == i)  // Parent is the current contour
+          childrenContours.push_back(contours[j]);
+
+      for (const std::vector<cv::Point>& childContour : childrenContours) {
+        // If the drone is inside a hole, then this is not the contour we are looking
+        // for
+        if (cv::pointPolygonTest(childContour, droneCoordinates, false) > 0)
+          droneInHole = true;
+        break;
+      }
+
+      // If drone is not in any of the holes, then the current contour is accurate
+      if (!droneInHole) {
+        relevantContour.external = contour;
+        relevantContour.internal = childrenContours;
+        relevantContour.valid = true;
+      }
     }
+  }
+
+  if (!relevantContour.valid) {
+    ROS_ERROR("Contour cannot be set properly. Investigate");
   }
 
   return relevantContour;
@@ -154,9 +192,17 @@ std::vector<cv::Point> extractTraversibleContour(const cv::Mat& traversible,
 std::vector<cv::Point> findFrontierPoints(const cv::Mat& traversible,
                                           const cv::Mat& occupiedSafe,
                                           const cv::Point& droneCoordinates) {
-  std::vector<cv::Point> contour =
-      extractTraversibleContour(traversible, droneCoordinates, false);
-  if (contour.size() == 0) {
+  Contour contour = extractTraversibleContour(traversible, droneCoordinates, false);
+
+  // All external and internal points are at the boundary & is therefore valid frontiers
+  std::vector<cv::Point> boundaryPoints;
+  boundaryPoints.insert(boundaryPoints.end(), contour.external.begin(),
+                        contour.external.end());
+  for (const std::vector<cv::Point>& internalContour : contour.internal)
+    boundaryPoints.insert(boundaryPoints.end(), internalContour.begin(),
+                          internalContour.end());
+
+  if (boundaryPoints.size() == 0) {
     ROS_WARN("No contour points found");
     return std::vector<cv::Point>();
   }
@@ -171,7 +217,7 @@ std::vector<cv::Point> findFrontierPoints(const cv::Mat& traversible,
 
   std::vector<cv::Point> frontier;
 
-  for (const auto& pt : contour) {
+  for (const auto& pt : boundaryPoints) {
     if (occupiedContour.at<uchar>(pt) != 255)
       frontier.push_back(pt);
   }
@@ -642,7 +688,8 @@ cv::Point findClosestLoSSkeletonPoint(const std::vector<cv::Point>& skeletonPts,
 }
 
 void octomapCallback(const octomap_msgs::Octomap& msg) {
-  Timer timer;
+  Timer timer, timerGlobal;
+  timerGlobal.Tic();
   timer.Tic();
 
   // Convert from message to OcTree
@@ -676,6 +723,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   } catch (tf2::TransformException& ex) {
     ROS_WARN("%s", ex.what());
     ROS_WARN("Pose could not be computed. Exiting");
+    ROS_DEBUG("[TIMING] Total runtime: %.6f", timerGlobal.Toc());
     delete mapPtr;
     return;
   }
@@ -788,12 +836,14 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   cv::Mat costMap;
   std::vector<cv::Point> path, skeletonPts, frontier, uavToSkeleton, alongSkeleton,
       skeletonToTarget, frontierToTarget;
-  std::vector<cv::Point> traversibleRegionContainingUAV =
-      extractTraversibleContour(traversible, coordDrone, true);
   cv::Point selectedTarget(-1, -1);
 
-  if (traversibleRegionContainingUAV.empty()) {
+  Contour traversibleRegionContourContainingUAV =
+      extractTraversibleContour(traversible, coordDrone, true);
+
+  if (!traversibleRegionContourContainingUAV.valid) {
     ROS_WARN("Empty contour. Cannot calculate path");
+    ROS_DEBUG("[TIMING] Total runtime: %.6f", timerGlobal.Toc());
     visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
               uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
               coordsTarget, selectedTarget, kResolution);
@@ -802,12 +852,15 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   }
 
   // Extract skeleton for the contour that contains the UAV
-  // BUG: This doesn't work when the contour contains holes
   cv::Mat skeleton,
       traversibleContourContainingUAVMask(traversible.size(), CV_8UC1, cv::Scalar(0));
-  std::vector<std::vector<cv::Point>> contourForFilling{traversibleRegionContainingUAV};
 
-  cv::fillPoly(traversibleContourContainingUAVMask, contourForFilling, cv::Scalar(1));
+  std::vector<std::vector<cv::Point>> externalContourList{
+      traversibleRegionContourContainingUAV.external};
+
+  cv::fillPoly(traversibleContourContainingUAVMask, externalContourList, cv::Scalar(1));
+  cv::fillPoly(traversibleContourContainingUAVMask,
+               traversibleRegionContourContainingUAV.internal, cv::Scalar(0));
 
   cv::Mat traversibleContourContainingUAV =
       traversible.mul(traversibleContourContainingUAVMask);
@@ -822,6 +875,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   if (skeletonPts.empty()) {
     ROS_ERROR("Skeleton could not be computed. Investigate");
+    ROS_DEBUG("[TIMING] Total runtime: %.6f", timerGlobal.Toc());
     visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
               uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
               coordsTarget, selectedTarget, kResolution);
@@ -840,12 +894,9 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
             timer.Toc());
 
   std::vector<cv::Point> targetsInTraversibleRegion;
-  for (const cv::Point& pt : coordsTarget) {
-    if (!traversibleRegionContainingUAV.empty() &&
-        cv::pointPolygonTest(traversibleRegionContainingUAV, pt, false) > 0) {
+  for (const cv::Point& pt : coordsTarget)
+    if (traversibleContourContainingUAV.at<uint8_t>(pt) > 0)
       targetsInTraversibleRegion.push_back(pt);
-    }
-  }
 
   if (!targetsInTraversibleRegion.empty()) {
     ROS_DEBUG(">>> Target location is inside the traversible region");
@@ -887,7 +938,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     // Without a frontier, cannot do anything
     if (frontier.empty()) {
       ROS_WARN("Frontier cannot be computed. Exiting");
-
+      ROS_DEBUG("[TIMING] Total runtime: %.6f", timerGlobal.Toc());
       visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
                 uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
                 coordsTarget, selectedTarget, kResolution);
@@ -905,6 +956,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
     // return empty path
     if (costMap.empty()) {
       ROS_ERROR("Cost map empty. Investigate");
+      ROS_DEBUG("[TIMING] Total runtime: %.6f", timerGlobal.Toc());
       visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
                 uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
                 coordsTarget, selectedTarget, kResolution);
@@ -1049,15 +1101,14 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
   uavToFrontier.poses = pathPoses;
   pathPub.publish(uavToFrontier);
 
+  ROS_DEBUG("[TIMING] Total runtime: %.6f", timerGlobal.Toc());
+
   visualize(costMap, traversible, occupied, skeletonPts, coordDrone, frontier,
             uavToSkeleton, alongSkeleton, skeletonToTarget, frontierToTarget,
             coordsTarget, selectedTarget, kResolution);
 
   // Free map pointers
   delete mapPtr;
-
-  ROS_DEBUG(" ##### Exiting pathfinder #####");
-
   return;
 }
 
