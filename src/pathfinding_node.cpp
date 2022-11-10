@@ -57,7 +57,7 @@ geometry_msgs::Point targetMin, targetMax;
 
 // Drone radius and safety margin (in meters). Occupied cells will be expanded
 // by kDroneRadius * 2 + kSafetymargin to avoid collisions
-const double kDroneRadius = 0.2, kSafetyMargin = 0.1;
+const double kDroneRadius = 0.3, kSafetyMargin = 0.2;
 
 // Navigation height (z axis value)
 const double kNavigationHeight = 1.0;
@@ -194,7 +194,8 @@ std::vector<cv::Point> findFrontierPoints(const cv::Mat& traversible,
                                           const cv::Point& droneCoordinates) {
   Contour contour = extractTraversibleContour(traversible, droneCoordinates, false);
 
-  // All external and internal points are at the boundary & is therefore valid frontiers
+  // All external and internal points are at the boundary & are therefore valid
+  // frontiers
   std::vector<cv::Point> boundaryPoints;
   boundaryPoints.insert(boundaryPoints.end(), contour.external.begin(),
                         contour.external.end());
@@ -599,35 +600,39 @@ void visualize(const cv::Mat& costMap,
     cv::circle(visual, pt, 0, cv::Scalar(100, 100, 100), 1);
   }
 
-  // Add drone location on map (magenta circle)
-  size_t radius = static_cast<size_t>(kDroneRadius / kResolution);
-  cv::circle(visual, coordDrone, radius, cv::Scalar(255, 0, 255), 1);
-
-  // Mark frontier points (white)
+  // Mark frontier points (cyan)
   for (const auto& pt : frontier)
-    cv::circle(visual, pt, 0, cv::Scalar(255, 255, 255), 1);
+    // cv::circle(visual, pt, 0, cv::Scalar(255, 255, 255), 1);
+    cv::circle(visual, pt, 0, cv::Scalar(0, 100, 255), 1);
 
   // ### Paths ###
 
-  // UAV -> Skeleton (blue-ish)
+  // UAV -> Skeleton (light gray)
   for (const auto& pt : uavToSkeleton)
-    cv::circle(visual, pt, 0, cv::Scalar(255, 155, 0), 1);
+    // cv::circle(visual, pt, 0, cv::Scalar(255, 155, 0), 1);
+    cv::circle(visual, pt, 0, cv::Scalar(200, 200, 200), 1);
 
   // Along skeleton (light gray)
   for (const auto& pt : alongSkeleton)
     cv::circle(visual, pt, 0, cv::Scalar(200, 200, 200), 1);
 
-  // Skeleton -> frontier / target (orange)
+  // Skeleton -> frontier / target (light gray)
   for (const auto& pt : skeletonToTarget)
-    cv::circle(visual, pt, 0, cv::Scalar(0, 155, 255), 1);
+    // cv::circle(visual, pt, 0, cv::Scalar(0, 155, 255), 1);
+    cv::circle(visual, pt, 0, cv::Scalar(200, 200, 200), 1);
 
-  // Add target location on map (purple)
+  // Add target location(s) on map (purple)
   for (const auto& pt : coordsTarget)
     cv::circle(visual, pt, 0, cv::Scalar(100, 0, 100), -1);
 
-  // Frontier -> target (yellow)
+  // Frontier -> target (orange)
   for (const auto& pt : frontierToTarget)
-    cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
+    // cv::circle(visual, pt, 0, cv::Scalar(0, 255, 255), 1);
+    cv::circle(visual, pt, 0, cv::Scalar(255, 255, 0), 1);
+
+  // Add drone location on map (magenta circle)
+  size_t radius = static_cast<size_t>(kDroneRadius / kResolution);
+  cv::circle(visual, coordDrone, radius, cv::Scalar(255, 0, 255), 1);
 
   // Add selected target point on map (magenta)
   if (selectedTarget.x > -1)
@@ -811,7 +816,7 @@ void octomapCallback(const octomap_msgs::Octomap& msg) {
 
   // Perform morphological closing on free map to eliminate small holes
   cv::Mat kernel3x3 =
-      cv::getStructuringElement(cv::MorphShapes::MORPH_RECT, cv::Size(3, 3));
+      cv::getStructuringElement(cv::MorphShapes::MORPH_ELLIPSE, cv::Size(3, 3));
   cv::morphologyEx(free, free, cv::MORPH_CLOSE, kernel3x3);
 
   // Dilate occupied cells to provide buffer for collision
