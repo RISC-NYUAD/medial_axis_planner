@@ -44,7 +44,7 @@ tf2_ros::Buffer tfBuffer;
 // (TODO: Convert to configurable parameters)
 
 // Map points within drone_z \pm mapSlicezthickness are used in 2D conversion
-const double kMapSliceZThickness = 0.2;
+const double kMapSliceZThickness = 0.35;
 
 // Min / max height of the map to be considered, to remove floor / ceiling
 const double kMinHeight = 0.0, kMaxHeight = 3.0;
@@ -60,7 +60,7 @@ geometry_msgs::Point targetMin, targetMax;
 const double kDroneRadius = 0.3, kSafetyMargin = 0.2;
 
 // Navigation height (z axis value)
-const double kNavigationHeight = 1.0;
+const double kNavigationHeight = 0.8;
 
 // ##### Publishers #####
 image_transport::Publisher debugVis;  // Debug visualization
