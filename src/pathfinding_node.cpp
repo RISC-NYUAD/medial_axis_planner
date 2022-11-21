@@ -57,7 +57,7 @@ geometry_msgs::Point targetMin, targetMax;
 
 // Drone radius and safety margin (in meters). Occupied cells will be expanded
 // by kDroneRadius * 2 + kSafetymargin to avoid collisions
-const double kDroneRadius = 0.3, kSafetyMargin = 0.2;
+const double kDroneRadius = 0.25, kSafetyMargin = 0.1;
 
 // Navigation height (z axis value)
 const double kNavigationHeight = 0.8;
