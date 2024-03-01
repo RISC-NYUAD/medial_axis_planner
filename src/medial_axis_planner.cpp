@@ -1,5 +1,6 @@
 #include "medial_axis_planner/medial_axis_planner.hpp"
 #include "nav2_util/node_utils.hpp"
+#include "timer.hpp"
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 #include <opencv2/ximgproc.hpp>
@@ -17,17 +18,18 @@ void MedialAxis::configure(
     std::shared_ptr<tf2_ros::Buffer> tf,
     std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros) {
 
-  tf_ = tf;
-  name_ = name;
-  costmap_ = costmap_ros->getCostmap();
-  global_frame_ = costmap_ros->getGlobalFrameID();
-
   node_ = parent.lock();
   clock_ = node_->get_clock();
   logger_ = node_->get_logger();
 
   RCLCPP_INFO_STREAM(logger_,
                      "Configuring plugin " << name_ << " of type MedialAxis");
+
+  tf_ = tf;
+  name_ = name;
+  costmap_ = costmap_ros->getCostmap();
+  footprint_ = costmap_ros->getUnpaddedRobotFootprint();
+  global_frame_ = costmap_ros->getGlobalFrameID();
 
   // Publisher for debug image
   debug_publisher_ =
@@ -55,10 +57,20 @@ void MedialAxis::configure(
   // occupied_lut_.at<uint8_t>(0, nav2_costmap_2d::INSCRIBED_INFLATED_OBSTACLE)
   // = 255;
 
-  // Anything between free and MAX_NON_OBSTACLE is dangerous to approach
+  // Anything between free and MAX_NON_OBSTACLE is dangerous to approach, but
+  // they are still valid
   danger_lut_ = cv::Mat(1, 256, CV_8U, cv::Scalar(0));
   for (size_t i = 1; i <= nav2_costmap_2d::MAX_NON_OBSTACLE; ++i)
     danger_lut_.at<uint8_t>(0, i) = 255;
+
+  // Remap distances to logical values. By default, NO_INFORMATION is 255, and
+  // LETHAL_OBSTACLE is 254. We allow traversing unknown, so we should treat it
+  // (and visualize it) as free
+  costmap_lut_ = cv::Mat(1, 256, CV_8U);
+  for (size_t i = 0; i < 256; ++i) {
+    costmap_lut_.at<uint8_t>(0, i) = i;
+  }
+  costmap_lut_.at<uint8_t>(0, nav2_costmap_2d::NO_INFORMATION) = 0;
 }
 
 void MedialAxis::cleanup() {
@@ -78,19 +90,28 @@ nav_msgs::msg::Path
 MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
                        const geometry_msgs::msg::PoseStamped &goal) {
 
+  static Timer t;
+
+  RCLCPP_INFO(logger_, "New path requested from MedialAxis planner");
+
   const size_t size_x = costmap_->getSizeInCellsX(),
                size_y = costmap_->getSizeInCellsY();
 
   // For OpenCV mat converted in below method, x right, y down (z inwards)
   // Use cv::flip(src, src, 0) for z upwards
+  t.tic();
   cv::Mat costmap_raw(size_y, size_x, CV_8UC1, costmap_->getCharMap());
+  RCLCPP_INFO_STREAM(logger_, "[TIMING] costmap2d->Mat: " << t.toc());
 
   // Lookup tables to extract individual layers
-  cv::Mat occupied, free, unknown, dangerous;
+  t.tic();
+  cv::Mat occupied, free, unknown, dangerous, costmap;
   cv::LUT(costmap_raw, occupied_lut_, occupied);
   cv::LUT(costmap_raw, free_lut_, free);
   cv::LUT(costmap_raw, unknown_lut_, unknown);
   cv::LUT(costmap_raw, danger_lut_, dangerous);
+  cv::LUT(costmap_raw, costmap_lut_, costmap);
+  RCLCPP_INFO_STREAM(logger_, "[TIMING] Extract zones: " << t.toc());
 
   // Extract start and end coordinates
   cv::Point start_coords, goal_coords;
@@ -108,15 +129,18 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
   }
 
   // FIXME: make including unknown cells optional
+  t.tic();
   cv::Mat traversible = free + dangerous + unknown;
   cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
   cv::morphologyEx(traversible, traversible, cv::MORPH_CLOSE, kernel);
   cv::morphologyEx(traversible, traversible, cv::MORPH_OPEN, kernel);
+  RCLCPP_INFO_STREAM(logger_, "[TIMING] Opening and closing: " << t.toc());
 
   // Extract the region that contains the starting (current) position
   RegionContours region_containing_start_pos =
       extractRegionContainingCoordinate(traversible, start_coords, true);
 
+  t.tic();
   {
     cv::Mat traversible_region_mask(traversible.size(), CV_8UC1, cv::Scalar(0));
     cv::fillPoly(traversible_region_mask,
@@ -125,6 +149,7 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
                  cv::Scalar(0));
     traversible = traversible.mul(traversible_region_mask);
   }
+  RCLCPP_INFO_STREAM(logger_, "[TIMING] Masking: " << t.toc());
 
   // Prevent the border from being traversible. Adds weird axis points
   {
@@ -136,44 +161,79 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
     traversible = traversible.mul(border_mask);
   }
 
-  // Extract medial axis (i.e. skeleton) coordinates
-  cv::Mat medial_axis;
-  cv::ximgproc::thinning(traversible, medial_axis);
-  std::vector<cv::Point> medial_axis_pts;
-  cv::findNonZero(medial_axis, medial_axis_pts);
+  // Declare some variables in advance to place them in correct scope
+  std::vector<cv::Point> medial_axis_pts, path_map;
+  nav_msgs::msg::Path path;
 
-  // Shortest path from start to skeleton
-  cv::Point medial_axis_entry =
-      findClosesetLineofSightFrom(medial_axis_pts, start_coords, traversible);
+  // // Check if a line-of-sight path is possible
+  // path_map = computeLineOfSightPath(traversible, start_coords, goal_coords);
 
-  // Shortest path from skeleton to goal
-  // TODO: Use costmap for selection?
-  cv::Point medial_axis_exit =
-      findClosesetLineofSightFrom(medial_axis_pts, goal_coords, traversible);
+  if (path_map.empty()) {
 
-  // Path along the medial axis itself
-  std::vector<cv::Point> path_along_medial_axis = findPathAlongMedialAxis(
-      medial_axis_pts, medial_axis_entry, medial_axis_exit);
+    // Extract medial axis (i.e. skeleton) coordinates
+    t.tic();
+    cv::Mat medial_axis;
+    cv::ximgproc::thinning(traversible, medial_axis);
+    cv::findNonZero(medial_axis, medial_axis_pts);
+    RCLCPP_INFO_STREAM(logger_, "[TIMING] Medial axis: " << t.toc());
 
-  // Construct path
-  std::vector<cv::Point> path_map;
-  {
-    std::vector<cv::Point> start_to_medial_axis =
-        computeLineOfSightPath(traversible, start_coords, medial_axis_entry);
-    std::vector<cv::Point> medial_axis_to_goal =
-        computeLineOfSightPath(traversible, medial_axis_exit, goal_coords);
+    // Shortest path from start to skeleton
+    cv::Point medial_axis_entry =
+        findClosesetLineofSightFrom(medial_axis_pts, start_coords, traversible);
 
-    path_map.insert(path_map.end(), start_to_medial_axis.begin(),
-                    start_to_medial_axis.end());
-    path_map.insert(path_map.end(), path_along_medial_axis.begin(),
-                    path_along_medial_axis.end());
-    path_map.insert(path_map.end(), medial_axis_to_goal.begin(),
-                    medial_axis_to_goal.end());
+    // Shortest path from skeleton to goal
+    // TODO: Use costmap for selection?
+    cv::Point medial_axis_exit =
+        findClosesetLineofSightFrom(medial_axis_pts, goal_coords, traversible);
+
+    // Path along the medial axis itself
+    std::vector<cv::Point> path_along_medial_axis = findPathAlongMedialAxis(
+        medial_axis_pts, medial_axis_entry, medial_axis_exit, costmap);
+
+    // If path along the medial axis is empty, path is invalid
+    if (!path_along_medial_axis.empty()) {
+      std::vector<cv::Point> start_to_medial_axis =
+          computeLineOfSightPath(traversible, start_coords, medial_axis_entry);
+      std::vector<cv::Point> medial_axis_to_goal =
+          computeLineOfSightPath(traversible, medial_axis_exit, goal_coords);
+
+      path_map.insert(path_map.end(), start_to_medial_axis.begin(),
+                      start_to_medial_axis.end());
+      path_map.insert(path_map.end(), path_along_medial_axis.begin(),
+                      path_along_medial_axis.end());
+      path_map.insert(path_map.end(), medial_axis_to_goal.begin(),
+                      medial_axis_to_goal.end());
+    }
   }
+
+  // Assign angles based on next point in line
+  const size_t N = path_map.size();
+  std::vector<double> path_yaw;
+
+  if (N == 0) {
+    RCLCPP_WARN(logger_, "Could not compute path");
+  } else {
+    path_yaw.resize(N);
+    for (size_t i = 0; i < N - 1; ++i) {
+      const cv::Point &current = path_map.at(i), &next = path_map.at(i + 1);
+      path_yaw.at(i) = std::atan2(next.y - current.y, next.x - current.x);
+    }
+    // FIXME: Where should we get the last yaw from?
+    path_yaw.at(N - 1) = path_yaw.at(N - 2);
+
+    // Convert from map to world, append the final goal path
+    path = convertMapPathToRealPath(path_map, path_yaw, start.header);
+    // path.poses.push_back(goal);
+  }
+
+  RCLCPP_INFO(logger_, "Path planning completed");
 
   // Visualization
   cv::Mat zeros(size_y, size_x, CV_8UC1, cv::Scalar(0));
-  std::vector<cv::Mat> channels{zeros, traversible, occupied};
+  cv::Mat costmap_inverse(costmap.size(), CV_8UC1, cv::Scalar(255));
+  costmap_inverse = costmap_inverse - costmap;
+
+  std::vector<cv::Mat> channels{zeros, costmap_inverse, occupied};
   cv::Mat visual;
   cv::merge(channels, visual);
 
@@ -191,6 +251,48 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
   cv::circle(visual, start_coords, 1, cv::Scalar(255, 0, 255), 1);
   cv::circle(visual, goal_coords, 1, cv::Scalar(155, 155, 0), 1);
 
+  // Draw some of the boxes
+  for (size_t i = 0; i < N; i = i + 10) {
+
+    const auto &position = path_map.at(i);
+    double yaw = path_yaw.at(i);
+
+    RCLCPP_WARN_STREAM(logger_, "ID: " << i + 1 << "/" << N << " Pt: ("
+                                       << position.x << ", " << position.y
+                                       << ") Yaw: " << yaw);
+
+    double cost = computePoseCost(position, yaw, costmap);
+    RCLCPP_WARN_STREAM(logger_, "Cost:" << cost);
+
+    // Find out the oriented footprint coordinates
+    double wx, wy;
+    costmap_->mapToWorld(position.x, position.y, wx, wy);
+
+    std::vector<geometry_msgs::msg::Point> footprint_rotated(4);
+    std::vector<cv::Point> footprint_map(4);
+
+    const double cos = std::cos(yaw), sin = std::sin(yaw);
+
+    for (size_t j = 0; j < 4; ++j) {
+      const geometry_msgs::msg::Point &corner = footprint_.at(j);
+      geometry_msgs::msg::Point &corner_rotated = footprint_rotated.at(j);
+
+      corner_rotated.x = wx + cos * corner.x - sin * corner.y;
+      corner_rotated.y = wy + sin * corner.x + cos * corner.y;
+
+      unsigned int cx, cy;
+      costmap_->worldToMap(corner_rotated.x, corner_rotated.y, cx, cy);
+      footprint_map.at(j).x = cx;
+      footprint_map.at(j).y = cy;
+    }
+
+    for (size_t j = 0; j < 4; ++j) {
+      const auto &start_line = footprint_map.at(j),
+                 &end_line = footprint_map.at((j + 1) % 4);
+      cv::line(visual, start_line, end_line, cv::Scalar(255, 0, 0));
+    }
+  }
+
   cv::flip(visual, visual, 0);
 
   std_msgs::msg::Header header;
@@ -198,16 +300,13 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
       cv_bridge::CvImage(header, "bgr8", visual).toImageMsg();
   debug_publisher_->publish(*visual_msg.get());
 
-  nav_msgs::msg::Path path = convertMapPathToRealPath(path_map, start.header);
-
-  // Append the goal
-  path.poses.push_back(goal);
-
   return path;
 }
 
-RegionContours MedialAxis::extractRegionContainingCoordinate(
-    const cv::Mat &traversible, const cv::Point &coordinate, bool simplify) {
+RegionContours
+MedialAxis::extractRegionContainingCoordinate(const cv::Mat &traversible,
+                                              const cv::Point &coordinate,
+                                              bool simplify) const {
   std::vector<std::vector<cv::Point>> contours;
   std::vector<cv::Vec4i> hierarchy;
 
@@ -265,10 +364,9 @@ RegionContours MedialAxis::extractRegionContainingCoordinate(
   return relevant_contour;
 }
 
-// Give coordinates of the closest line-of-sight point from the set
 cv::Point MedialAxis::findClosesetLineofSightFrom(
     const std::vector<cv::Point> &candidates, const cv::Point &target,
-    const cv::Mat &valid_region) {
+    const cv::Mat &valid_region) const {
   float current_distance = std::numeric_limits<float>::max(),
         backup_distance = std::numeric_limits<float>::max();
 
@@ -312,8 +410,9 @@ cv::Point MedialAxis::findClosesetLineofSightFrom(
 
   return closest_point;
 }
+
 std::vector<cv::Point> MedialAxis::computeLineOfSightPath(
-    const cv::Mat &region, const cv::Point &start, const cv::Point &end) {
+    const cv::Mat &region, const cv::Point &start, const cv::Point &end) const {
   std::vector<cv::Point> retval;
   cv::LineIterator it(region, start, end, 8);
 
@@ -331,14 +430,13 @@ std::vector<cv::Point> MedialAxis::computeLineOfSightPath(
 
 std::vector<cv::Point> MedialAxis::findPathAlongMedialAxis(
     const std::vector<cv::Point> &medial_axis_pts, const cv::Point &start,
-    const cv::Point &end) {
+    const cv::Point &end, const cv::Mat &costmap) const {
 
   // Struct to hold point and a distance
   struct PtWithDistance {
     size_t idx;
     cv::Point pt;
-    // uint16_t dist; // For l-inf
-    float dist;
+    size_t dist;
   };
 
   // Comparator reversed for higher priority on small distances
@@ -366,7 +464,7 @@ std::vector<cv::Point> MedialAxis::findPathAlongMedialAxis(
   size_t N = medial_axis_pts.size();
   // std::vector<uint16_t> nodeDistances(N,
   // std::numeric_limits<uint16_t>::max());
-  std::vector<float> nodeDistances(N, std::numeric_limits<float>::max());
+  std::vector<size_t> nodeDistances(N, std::numeric_limits<size_t>::max());
 
   std::vector<bool> visited(N, false);
 
@@ -395,7 +493,7 @@ std::vector<cv::Point> MedialAxis::findPathAlongMedialAxis(
                       PtWithDistanceComparator>
       pq;
 
-  // Start point has 0 distance
+  // Starting point has 0 distance
   nodeDistances[ptToIdx[start]] = 0;
   for (size_t i = 0; i < N; ++i)
     pq.push(PtWithDistance{i, medial_axis_pts[i], nodeDistances[i]});
@@ -408,7 +506,7 @@ std::vector<cv::Point> MedialAxis::findPathAlongMedialAxis(
     pq.pop();
 
     // Ensure distance is up to date
-    if (curr.dist != nodeDistances[curr.idx])
+    if (curr.dist > nodeDistances[curr.idx])
       continue;
 
     // Terminate if the end node is reached
@@ -431,14 +529,19 @@ std::vector<cv::Point> MedialAxis::findPathAlongMedialAxis(
       if (visited[neighborIdx])
         continue;
 
-      // Using l-inf distance
-      // uint16_t newDist = curr.dist + 1;
+      // Distance is step + cost of the cell, without scaling
+      // This way, the aim is to avoid dangerous cells as much as possible
+      size_t cost = static_cast<size_t>(costmap.at<uint8_t>(neighbor)),
+             multiplier = 1;
 
-      // Using Euclidean distance
-      cv::Point diff = curr.pt - neighbor;
-      float dist = std::sqrt(static_cast<float>(diff.x * diff.x) +
-                             static_cast<float>(diff.y * diff.y));
-      float newDist = curr.dist + dist;
+      // Blow up lethal obstacle + its inflated border costs
+      // Anything above nav2_costmap_2d::MAX_NON_OBSTACLE (= 252)
+      if (cost > 252)
+        multiplier = 100;
+
+      size_t newDist = curr.dist + 1 + cost * multiplier;
+      RCLCPP_INFO_STREAM(logger_, "Current: " << curr.dist << " Cost: " << cost
+                                              << " Next: " << newDist);
 
       if (newDist < nodeDistances[neighborIdx]) {
         nodeDistances[neighborIdx] = newDist;
@@ -469,8 +572,7 @@ std::vector<cv::Point> MedialAxis::findPathAlongMedialAxis(
   return path;
 }
 
-// Compute 8-neighbors of a given point
-std::vector<cv::Point> MedialAxis::computeNeighbors(const cv::Point &pt) {
+std::vector<cv::Point> MedialAxis::computeNeighbors(const cv::Point &pt) const {
   // Neighborhood order in x and y: From top, clockwise
   const int neighborX[8] = {0, 1, 1, 1, 0, -1, -1, -1},
             neighborY[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
@@ -484,9 +586,9 @@ std::vector<cv::Point> MedialAxis::computeNeighbors(const cv::Point &pt) {
   return neighborhood;
 }
 
-nav_msgs::msg::Path
-MedialAxis::convertMapPathToRealPath(const std::vector<cv::Point> &path_map,
-                                     const std_msgs::msg::Header &header) {
+nav_msgs::msg::Path MedialAxis::convertMapPathToRealPath(
+    const std::vector<cv::Point> &path_map, const std::vector<double> &path_yaw,
+    const std_msgs::msg::Header &header) const {
 
   nav_msgs::msg::Path path_world;
   path_world.header = header;
@@ -495,8 +597,8 @@ MedialAxis::convertMapPathToRealPath(const std::vector<cv::Point> &path_map,
   path_world.poses.resize(N);
 
   // Iterating up to N-1, so that the last entry exists
-  for (size_t i = 0; i < N - 1; ++i) {
-    const cv::Point &pt = path_map.at(i), &pt_next = path_map.at(i + 1);
+  for (size_t i = 0; i < N; ++i) {
+    const cv::Point &pt = path_map.at(i);
     auto &pose = path_world.poses.at(i);
     pose.header = header;
 
@@ -505,8 +607,7 @@ MedialAxis::convertMapPathToRealPath(const std::vector<cv::Point> &path_map,
     pose.pose.position.x = x;
     pose.pose.position.y = y;
 
-    // Assign yaw to point to the next entry
-    double yaw = std::atan2(pt_next.y - pt.y, pt_next.x - pt.x);
+    double yaw = path_yaw.at(i);
     pose.pose.orientation.x = 0.0;
     pose.pose.orientation.y = 0.0;
     pose.pose.orientation.z = std::sin(yaw / 2.);
@@ -514,6 +615,66 @@ MedialAxis::convertMapPathToRealPath(const std::vector<cv::Point> &path_map,
   }
 
   return path_world;
+}
+
+double MedialAxis::computePoseCost(cv::Point position, double yaw,
+                                   const cv::Mat &costmap) const {
+  // FIXME: Compute more optimally
+  // Compute corners based on yaw and footprint to create a mask
+  double wx, wy;
+  costmap_->mapToWorld(position.x, position.y, wx, wy);
+
+  std::vector<geometry_msgs::msg::Point> footprint_rotated(4);
+  std::vector<cv::Point> footprint_map(4);
+
+  const double cos = std::cos(yaw), sin = std::sin(yaw);
+
+  for (size_t i = 0; i < 4; ++i) {
+    const geometry_msgs::msg::Point &corner = footprint_.at(i);
+    geometry_msgs::msg::Point &corner_rotated = footprint_rotated.at(i);
+
+    corner_rotated.x = wx + cos * corner.x - sin * corner.y;
+    corner_rotated.y = wy + sin * corner.x + cos * corner.y;
+
+    unsigned int cx, cy;
+    costmap_->worldToMap(corner_rotated.x, corner_rotated.y, cx, cy);
+    footprint_map.at(i).x = cx;
+    footprint_map.at(i).y = cy;
+  }
+
+  // Restrict calculations to ROI of the footprint to save time
+  const auto &pt = footprint_map.at(0);
+  int min_x = pt.x, min_y = pt.y, max_x = pt.x, max_y = pt.y;
+  for (size_t i = 1; i < 4; ++i) {
+    min_x = std::min(min_x, footprint_map.at(i).x);
+    min_y = std::min(min_y, footprint_map.at(i).y);
+    max_x = std::max(max_x, footprint_map.at(i).x);
+    max_y = std::max(max_y, footprint_map.at(i).y);
+  }
+
+  RCLCPP_INFO_STREAM(logger_, "x range: " << min_x << ", " << max_x
+                                          << " y range: " << min_y << ", "
+                                          << max_y);
+
+  std::vector<cv::Point> footprint_roi(4);
+  for (size_t i = 0; i < 4; ++i) {
+    const auto &pt = footprint_map.at(i);
+    footprint_roi.at(i).x = pt.x - min_x;
+    footprint_roi.at(i).y = pt.y - min_y;
+    RCLCPP_INFO_STREAM(logger_, "Masked corners: " << footprint_roi.at(i).x
+                                                   << ", "
+                                                   << footprint_roi.at(i).y);
+  }
+
+  cv::Rect roi(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
+  cv::Mat costmap_roi(costmap, roi);
+  RCLCPP_INFO_STREAM(logger_, "ROI Costmap size: " << costmap_roi.cols << ", "
+                                                   << costmap_roi.rows);
+
+  cv::Mat mask(costmap_roi.size(), CV_8UC1, cv::Scalar(0));
+  cv::fillConvexPoly(mask, footprint_roi, cv::Scalar(1));
+  costmap_roi = costmap_roi.mul(mask);
+  return cv::sum(costmap_roi)[0];
 }
 
 } // namespace medial_axis_planner
