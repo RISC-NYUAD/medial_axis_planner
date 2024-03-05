@@ -94,6 +94,8 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
   static Timer t;
 
   RCLCPP_INFO(logger_, "New path requested from MedialAxis planner");
+  const double dx = goal.pose.position.x - start.pose.position.x,
+               dy = goal.pose.position.y - start.pose.position.y;
 
   const size_t size_x = costmap_->getSizeInCellsX(),
                size_y = costmap_->getSizeInCellsY();
@@ -171,8 +173,10 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
   std::vector<cv::Point> medial_axis_pts, path_map;
   nav_msgs::msg::Path path;
 
-  // // Check if a line-of-sight path is possible
-  // path_map = computeLineOfSightPath(traversible, start_coords, goal_coords);
+  // Check if a line-of-sight path is possible
+  double start_to_goal_distance = std::hypot(dx, dy);
+  if (start_to_goal_distance < 2.0)
+    path_map = computeLineOfSightPath(costmap, start_coords, goal_coords);
 
   if (path_map.empty()) {
 
@@ -189,6 +193,8 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
     if (medial_axis_entry.empty()) {
       RCLCPP_WARN(logger_, "Cannot find a valid entry path to the medial axis");
     }
+    // Reverse to direct from start to medial axis
+    std::reverse(medial_axis_entry.begin(), medial_axis_entry.end());
 
     // Shortest/Cheapest path from skeleton to goal
     std::vector<cv::Point> medial_axis_exit =
@@ -201,7 +207,7 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
     // Path along the medial axis itself
     if (!medial_axis_entry.empty() and !medial_axis_exit.empty()) {
       std::vector<cv::Point> path_along_medial_axis =
-          findPathAlongMedialAxis(medial_axis_pts, medial_axis_entry.at(0),
+          findPathAlongMedialAxis(medial_axis_pts, medial_axis_entry.back(),
                                   medial_axis_exit.at(0), costmap);
       // If path along the medial axis is empty, path is invalid
       if (!path_along_medial_axis.empty()) {
@@ -266,41 +272,41 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
   cv::circle(visual, start_coords, 1, cv::Scalar(255, 0, 255), 1);
   cv::circle(visual, goal_coords, 1, cv::Scalar(155, 155, 0), 1);
 
-  // Draw some of the boxes
-  for (size_t i = 0; i < N; i = i + 10) {
+  // // Draw some of the boxes
+  // for (size_t i = 0; i < N; i = i + 10) {
 
-    const auto &position = path_map.at(i);
-    double yaw = path_yaw.at(i);
-    double cost = computePoseCost(position, yaw, costmap);
+  //   const auto &position = path_map.at(i);
+  //   double yaw = path_yaw.at(i);
+  //   double cost = computePoseCost(position, yaw, costmap);
 
-    // Find out the oriented footprint coordinates
-    double wx, wy;
-    costmap_->mapToWorld(position.x, position.y, wx, wy);
+  //   // Find out the oriented footprint coordinates
+  //   double wx, wy;
+  //   costmap_->mapToWorld(position.x, position.y, wx, wy);
 
-    std::vector<geometry_msgs::msg::Point> footprint_rotated(4);
-    std::vector<cv::Point> footprint_map(4);
+  //   std::vector<geometry_msgs::msg::Point> footprint_rotated(4);
+  //   std::vector<cv::Point> footprint_map(4);
 
-    const double cos = std::cos(yaw), sin = std::sin(yaw);
+  //   const double cos = std::cos(yaw), sin = std::sin(yaw);
 
-    for (size_t j = 0; j < 4; ++j) {
-      const geometry_msgs::msg::Point &corner = footprint_.at(j);
-      geometry_msgs::msg::Point &corner_rotated = footprint_rotated.at(j);
+  //   for (size_t j = 0; j < 4; ++j) {
+  //     const geometry_msgs::msg::Point &corner = footprint_.at(j);
+  //     geometry_msgs::msg::Point &corner_rotated = footprint_rotated.at(j);
 
-      corner_rotated.x = wx + cos * corner.x - sin * corner.y;
-      corner_rotated.y = wy + sin * corner.x + cos * corner.y;
+  //     corner_rotated.x = wx + cos * corner.x - sin * corner.y;
+  //     corner_rotated.y = wy + sin * corner.x + cos * corner.y;
 
-      unsigned int cx, cy;
-      costmap_->worldToMap(corner_rotated.x, corner_rotated.y, cx, cy);
-      footprint_map.at(j).x = cx;
-      footprint_map.at(j).y = cy;
-    }
+  //     unsigned int cx, cy;
+  //     costmap_->worldToMap(corner_rotated.x, corner_rotated.y, cx, cy);
+  //     footprint_map.at(j).x = cx;
+  //     footprint_map.at(j).y = cy;
+  //   }
 
-    for (size_t j = 0; j < 4; ++j) {
-      const auto &start_line = footprint_map.at(j),
-                 &end_line = footprint_map.at((j + 1) % 4);
-      cv::line(visual, start_line, end_line, cv::Scalar(255, 0, 0));
-    }
-  }
+  //   for (size_t j = 0; j < 4; ++j) {
+  //     const auto &start_line = footprint_map.at(j),
+  //                &end_line = footprint_map.at((j + 1) % 4);
+  //     cv::line(visual, start_line, end_line, cv::Scalar(255, 0, 0));
+  //   }
+  // }
 
   cv::flip(visual, visual, 0);
 
