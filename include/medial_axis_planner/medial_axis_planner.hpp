@@ -56,10 +56,16 @@ private:
                                                    bool simplify) const;
 
   // Give coordinates of the closest line-of-sight point from the set
-  cv::Point
-  findClosesetLineofSightFrom(const std::vector<cv::Point> &candidates,
+  std::vector<cv::Point>
+  findClosestLineOfSightFrom(const std::vector<cv::Point> &candidates,
+                             const cv::Point &target,
+                             const cv::Mat &costmap) const;
+
+  // Give coordinates of the "cheapest" line-of-sight point from the set
+  std::vector<cv::Point>
+  findCheapestLineOfSightFrom(const std::vector<cv::Point> &candidates,
                               const cv::Point &target,
-                              const cv::Mat &valid_region) const;
+                              const cv::Mat &costmap) const;
 
   // Checks if the linear trajectory between start and end points traverse
   // outside of the boundary defined by the image, and returns the straight
