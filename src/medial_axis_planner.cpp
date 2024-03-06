@@ -144,20 +144,20 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
   //   RCLCPP_ERROR(logger_, "Goal location is not traversible");
   // }
 
-  // Extract the region that contains the starting (current) position
-  RegionContours region_containing_start_pos =
-      extractRegionContainingCoordinate(traversible, start_coords, true);
+  // // Extract the region that contains the starting (current) position
+  // RegionContours region_containing_start_pos =
+  //     extractRegionContainingCoordinate(traversible, start_coords, true);
 
-  t.tic();
-  {
-    cv::Mat traversible_region_mask(traversible.size(), CV_8UC1, cv::Scalar(0));
-    cv::fillPoly(traversible_region_mask,
-                 {region_containing_start_pos.external}, cv::Scalar(1));
-    cv::fillPoly(traversible_region_mask, region_containing_start_pos.internal,
-                 cv::Scalar(0));
-    traversible = traversible.mul(traversible_region_mask);
-  }
-  RCLCPP_INFO_STREAM(logger_, "[TIMING] Masking: " << t.toc());
+  // t.tic();
+  // {
+  //   cv::Mat traversible_region_mask(traversible.size(), CV_8UC1, cv::Scalar(0));
+  //   cv::fillPoly(traversible_region_mask,
+  //                {region_containing_start_pos.external}, cv::Scalar(1));
+  //   cv::fillPoly(traversible_region_mask, region_containing_start_pos.internal,
+  //                cv::Scalar(0));
+  //   traversible = traversible.mul(traversible_region_mask);
+  // }
+  // RCLCPP_INFO_STREAM(logger_, "[TIMING] Masking: " << t.toc());
 
   // Prevent the border from being traversible. Adds weird axis points
   {
@@ -244,7 +244,7 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
 
     // Convert from map to world, append the final goal path
     path = convertMapPathToRealPath(path_map, path_yaw, start.header);
-    // path.poses.push_back(goal);
+    path.poses.push_back(goal);
   }
 
   RCLCPP_INFO(logger_, "Path planning completed");
@@ -254,7 +254,8 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
   cv::Mat costmap_inverse(costmap.size(), CV_8UC1, cv::Scalar(255));
   costmap_inverse = costmap_inverse - costmap;
 
-  std::vector<cv::Mat> channels{zeros, costmap_inverse, occupied};
+  // std::vector<cv::Mat> channels{zeros, costmap_inverse, occupied};
+  std::vector<cv::Mat> channels{zeros, traversible, occupied};
   cv::Mat visual;
   cv::merge(channels, visual);
 
