@@ -1,0 +1,4 @@
+* Medial axis-based Path Planning
+
+Implements a path planner plugin within [[https://navigation.ros.org/][Nav2]] that is maximally distant from obstacles.
+See [[https://github.com/RISC-NYUAD/CAIR-Unitree/tree/B1_284/cair_unitree_nav][CAIR Unitree's nav package]] as an example of using this.
