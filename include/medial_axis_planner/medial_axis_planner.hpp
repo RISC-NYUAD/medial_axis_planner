@@ -63,14 +63,15 @@ private:
   
   //Find the points near to a goal coords 
   std::vector<cv::Point> 
-  findPointsNearCenter(const cv::Point &center, double radius) const;
+  findPointsNearCenter(const cv::Point &center, double radius, const cv::Point &half_circle_dir) const;
 
   // Give coordinates of the closest line-of-sight point from the set with taking into consideration a tolerance value from the target point
   std::vector<cv::Point>
-  findClosestLineOfSightFrom2(const std::vector<cv::Point> &candidates,
-                             const cv::Point &target,
-                             const cv::Mat &costmap, 
-                             float tolerance) const;
+  findClosestExitPath(const std::vector<cv::Point> &candidates,
+                              const cv::Point &start_coords,
+                              const cv::Point &target,
+                              const cv::Mat &costmap,
+                              float tolerance) const;
 
   // Give coordinates of the "cheapest" line-of-sight point from the set
   std::vector<cv::Point>

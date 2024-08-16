@@ -5,6 +5,12 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/ximgproc.hpp>
 
+//Global variable to indicate exit path found
+bool exit_path_found = false;
+// Tolerance initialization
+int tolerance_in_pixels = 0;
+float tolerance_in_meters = 0.0;
+
 namespace medial_axis_planner {
 
 MedialAxis::MedialAxis() : tf_(nullptr), costmap_(nullptr) {}
@@ -35,7 +41,10 @@ void MedialAxis::configure(
   debug_publisher_ =
       node_->create_publisher<sensor_msgs::msg::Image>("planner_visual", 10);
 
-  // // Parameter initialization
+  // Parameter initialization
+  nav2_util::declare_parameter_if_not_declared(node_, name_ + ".tolerance", rclcpp::ParameterValue(0.5));
+  node_->get_parameter(name_ + ".tolerance", tolerance_in_meters);
+
   // nav2_util::declare_parameter_if_not_declared(
   //     node_, name_ + ".interpolation_resolution",
   //     rclcpp::ParameterValue(0.1));
@@ -99,6 +108,12 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
 
   const size_t size_x = costmap_->getSizeInCellsX(),
                size_y = costmap_->getSizeInCellsY();
+
+  // Calculate tolerance in pixels
+  double resolution = costmap_->getResolution();
+  tolerance_in_pixels = static_cast<int>(tolerance_in_meters / resolution);
+
+  RCLCPP_ERROR(logger_, "resolution: %f, tolerance_m: %f, tolerance_p: %d ", resolution, tolerance_in_meters, tolerance_in_pixels);
 
   // For OpenCV mat converted in below method, x right, y down (z inwards)
   // Use cv::flip(src, src, 0) for z upwards
@@ -198,7 +213,7 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
 
     // Shortest/Cheapest path from skeleton to goal
     std::vector<cv::Point> medial_axis_exit =
-        findClosestLineOfSightFrom2(medial_axis_pts, goal_coords, costmap, 5);
+        findClosestExitPath(medial_axis_pts, start_coords, goal_coords, costmap, tolerance_in_pixels);
     if (medial_axis_exit.empty()) {
       RCLCPP_WARN(logger_,
                   "Cannot find a valid exit path from the medial axis");
@@ -218,7 +233,7 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
         path_map.insert(path_map.end(), path_along_medial_axis.begin(),
                         path_along_medial_axis.end() - 1);
         path_map.insert(path_map.end(), medial_axis_exit.begin(),
-                        medial_axis_exit.end());
+                        medial_axis_exit.end() - 1);
       } else {
         RCLCPP_WARN(
             logger_,
@@ -244,7 +259,7 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
 
     // Convert from map to world, append the final goal path
     path = convertMapPathToRealPath(path_map, path_yaw, start.header);
-    path.poses.push_back(goal);
+    if (exit_path_found) path.poses.push_back(goal);
   }
 
   RCLCPP_INFO(logger_, "Path planning completed");
@@ -427,7 +442,7 @@ MedialAxis::findClosestLineOfSightFrom(const std::vector<cv::Point> &candidates,
 }
 
 std::vector<cv::Point> 
-MedialAxis::findPointsNearCenter(const cv::Point &center, double radius) const {
+MedialAxis::findPointsNearCenter(const cv::Point &center, double radius, const cv::Point &half_circle_dir) const {
    std::vector<cv::Point> nearby_points;
     
     // Define the bounding box for the circle
@@ -436,18 +451,29 @@ MedialAxis::findPointsNearCenter(const cv::Point &center, double radius) const {
     int y_min = center.y - radius;
     int y_max = center.y + radius;
     
-    // Iterate through the bounding box and check if each point is inside the circle
-    for (float x = x_min; x <= x_max; x += 0.5) {
-        for (float y = y_min; y <= y_max; y += 0.5) {
-            // Calculate the distance from the center to the current point
-            float dx = x - center.x;
-            float dy = y - center.y;
-            float distance_squared = dx * dx + dy * dy;
+    // Calculate the direction vector from the center to the robot's position
+    int dir_dx = half_circle_dir.x - center.x;
+    int dir_dy = half_circle_dir.y - center.y;
+    
+    // Normalize the direction vector
+    double dir_length = std::sqrt(dir_dx * dir_dx + dir_dy * dir_dy);
+    double norm_dir_dx = dir_dx / dir_length;
+    double norm_dir_dy = dir_dy / dir_length;
+
+    // Iterate through the bounding box and check if each point is inside the half-circle
+    for (int x = x_min; x <= x_max; x += 1) {
+        for (int y = y_min; y <= y_max; y += 1) {
+            // Calculate the vector from the center to the current point
+            int dx = x - center.x;
+            int dy = y - center.y;
+            int distance_squared = dx * dx + dy * dy;
             
-            // If the point is inside the circle, add it to the vector
-            if (distance_squared <= radius * radius) {
+            // Calculate the dot product between the direction vector and the point vector
+            double dot_product = dx * norm_dir_dx + dy * norm_dir_dy;
+            
+            // Check if the point is inside the half-circle and within the radius
+            if (dot_product > 0 && distance_squared <= radius * radius) {
                 nearby_points.push_back(cv::Point(x, y));
-                RCLCPP_WARN(logger_, "near point is (%f, %f)", x, y);
             }
         }
     }
@@ -456,7 +482,8 @@ MedialAxis::findPointsNearCenter(const cv::Point &center, double radius) const {
 }
 
 std::vector<cv::Point>
-MedialAxis::findClosestLineOfSightFrom2(const std::vector<cv::Point> &candidates,
+MedialAxis::findClosestExitPath(const std::vector<cv::Point> &candidates,
+                                        const cv::Point &start_coords,
                                         const cv::Point &target,
                                         const cv::Mat &costmap,
                                         float tolerance) const {
@@ -483,16 +510,19 @@ MedialAxis::findClosestLineOfSightFrom2(const std::vector<cv::Point> &candidates
   }
 
   if (!closest_path.empty()) {
-        return closest_path; // If a valid path is found, return it
+      exit_path_found = true;
+      return closest_path; // If a valid path is found, return it
   }
+  exit_path_found = false;
 
   RCLCPP_WARN(logger_, "Cannot reach the goal point. Finding the nearest reachable point near the goal point");
   // If no valid path, find the nearest reachable point to the target point from the costmap
   // such that (error = new_target - target) < tolerance
   current_distance = std::numeric_limits<float>::max();
+  float current_path_length = std::numeric_limits<float>::max();
   cv::Point best_new_target;
 
-  std::vector<cv::Point> nearby_points = findPointsNearCenter(target, tolerance);
+  std::vector<cv::Point> nearby_points = findPointsNearCenter(target, tolerance, start_coords);
 
   for (const cv::Point &near_point : nearby_points) {
           cv::Point new_target(near_point.x, near_point.y);
@@ -510,9 +540,19 @@ MedialAxis::findClosestLineOfSightFrom2(const std::vector<cv::Point> &candidates
                     continue;
                   } else {
                     current_distance = dist;
-                    RCLCPP_INFO(logger_, "The new distance is %f", dist);
-                    closest_path = line_of_sight_path;
-                    best_new_target = new_target;
+                    // Calculate the length of the line of sight path
+                    float path_length = 0.0;
+                    for (size_t i = 1; i < line_of_sight_path.size(); ++i) {
+                        cv::Point diff = line_of_sight_path[i] - line_of_sight_path[i - 1];
+                        path_length += std::hypot(diff.x, diff.y);
+                    }
+
+                    if (path_length < current_path_length) {
+                      current_path_length = path_length;
+                      closest_path = line_of_sight_path;
+                      best_new_target = new_target;
+                    }
+                  
                   }
               }
           }
@@ -521,7 +561,7 @@ MedialAxis::findClosestLineOfSightFrom2(const std::vector<cv::Point> &candidates
   RCLCPP_INFO(logger_, "The new chosen target is (%d,%d)", best_new_target.x, best_new_target.y);
   cv::Point diff = best_new_target - target;
   float dist = std::hypot(diff.x, diff.y);
-  RCLCPP_INFO(logger_, "Distance between old and new goal is %f", dist);
+  RCLCPP_INFO(logger_, "Distance between old and new goal is %f (in pixels)", dist);
 
   return closest_path;
 
