@@ -113,7 +113,7 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
   double resolution = costmap_->getResolution();
   tolerance_in_pixels = static_cast<int>(tolerance_in_meters / resolution);
 
-  RCLCPP_ERROR(logger_, "resolution: %f, tolerance_m: %f, tolerance_p: %d ", resolution, tolerance_in_meters, tolerance_in_pixels);
+  RCLCPP_INFO(logger_, "resolution: %f, tolerance_m: %f, tolerance_p: %d ", resolution, tolerance_in_meters, tolerance_in_pixels);
 
   // For OpenCV mat converted in below method, x right, y down (z inwards)
   // Use cv::flip(src, src, 0) for z upwards
@@ -190,8 +190,12 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
 
   // Check if a line-of-sight path is possible
   double start_to_goal_distance = std::hypot(dx, dy);
-  if (start_to_goal_distance < 2.0)
+  if (start_to_goal_distance < 0.5) {
     path_map = computeLineOfSightPath(costmap, start_coords, goal_coords);
+    //Set the flag to true to add the last pose 
+    exit_path_found = true;
+  }
+    
 
   if (path_map.empty()) {
 
