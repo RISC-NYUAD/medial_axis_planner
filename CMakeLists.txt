@@ -64,7 +64,6 @@ add_library(${LIBRARY_NAME} SHARED
   src/medial_axis_planner.cpp
 )
 
-
 ament_target_dependencies(
   ${LIBRARY_NAME}
   ${DEPENDENCIES}

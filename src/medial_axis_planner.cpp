@@ -1,7 +1,7 @@
 #include "medial_axis_planner/medial_axis_planner.hpp"
 #include "nav2_util/node_utils.hpp"
 #include "timer.hpp"
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/opencv.hpp>
 #include <opencv2/ximgproc.hpp>
 
