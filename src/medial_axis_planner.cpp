@@ -89,7 +89,8 @@ void MedialAxis::deactivate() {
 
 nav_msgs::msg::Path
 MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
-                       const geometry_msgs::msg::PoseStamped &goal) {
+                       const geometry_msgs::msg::PoseStamped &goal,
+                       std::function<bool()> cancel_checker) {
 
   static Timer t;
 
@@ -150,10 +151,11 @@ MedialAxis::createPlan(const geometry_msgs::msg::PoseStamped &start,
 
   // t.tic();
   // {
-  //   cv::Mat traversible_region_mask(traversible.size(), CV_8UC1, cv::Scalar(0));
-  //   cv::fillPoly(traversible_region_mask,
+  //   cv::Mat traversible_region_mask(traversible.size(), CV_8UC1,
+  //   cv::Scalar(0)); cv::fillPoly(traversible_region_mask,
   //                {region_containing_start_pos.external}, cv::Scalar(1));
-  //   cv::fillPoly(traversible_region_mask, region_containing_start_pos.internal,
+  //   cv::fillPoly(traversible_region_mask,
+  //   region_containing_start_pos.internal,
   //                cv::Scalar(0));
   //   traversible = traversible.mul(traversible_region_mask);
   // }

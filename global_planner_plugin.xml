@@ -1,5 +1,5 @@
 <library path="medial_axis_planner_plugin">
-  <class name="medial_axis_planner/MedialAxis" type="medial_axis_planner::MedialAxis" base_class_type="nav2_core::GlobalPlanner">
+  <class name="medial_axis_planner::MedialAxis" type="medial_axis_planner::MedialAxis" base_class_type="nav2_core::GlobalPlanner">
     <description>Medial axis-based global planner</description>
   </class>
 </library>

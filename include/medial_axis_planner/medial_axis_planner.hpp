@@ -42,9 +42,9 @@ public:
   void activate() override;
 
   // This method creates path for given start and goal pose.
-  nav_msgs::msg::Path
-  createPlan(const geometry_msgs::msg::PoseStamped &start,
-             const geometry_msgs::msg::PoseStamped &goal) override;
+  nav_msgs::msg::Path createPlan(const geometry_msgs::msg::PoseStamped &start,
+                                 const geometry_msgs::msg::PoseStamped &goal,
+                                 std::function<bool()> cancel_checker) override;
 
   // plugin deactivate
   void deactivate() override;
